@@ -17,7 +17,7 @@ from datasets import load_dataset
 from transformers import (AutoModelForSeq2SeqLM, AutoTokenizer, DataCollatorForSeq2Seq,
                           Seq2SeqTrainer, Seq2SeqTrainingArguments, AddedToken)
 
-from common import DATA, LANGS, OUTPUT_MODEL, ROOT, SOURCE_MODEL, tag
+from common import DATA, OUTPUT_MODEL, ROOT, SOURCE_MODEL, TAGS, tag
 
 CKPT = ROOT / "checkpoints"
 MAX_LEN = 128
@@ -29,12 +29,13 @@ INIT_FROM = {
     "runyankore": [">>kin<<", ">>run<<"],
     "acholi": ["<unk>"],                    # no Nilotic tag in the base model
     "lugbara": ["<unk>"],                   # no Central Sudanic tag in the base model
+    "english": ["<unk>"],                   # the base model only translated out of English
 }
 
 
 def add_language_tags(tok, model):
     vocab = tok.get_vocab()
-    new = [tag(l) for l in LANGS if tag(l) not in vocab]
+    new = [tag(l) for l in TAGS if tag(l) not in vocab]
     if not new:
         return
     tok.add_tokens([AddedToken(t, special=True, normalized=False) for t in new], special_tokens=True)
@@ -43,7 +44,7 @@ def add_language_tags(tok, model):
     model.config.decoder_vocab_size = len(tok)
     emb = model.get_input_embeddings().weight
     with torch.no_grad():
-        for lang in LANGS:
+        for lang in TAGS:
             t = tag(lang)
             if t not in new:
                 continue
@@ -71,9 +72,14 @@ def main():
     model = AutoModelForSeq2SeqLM.from_pretrained(SOURCE_MODEL)
     add_language_tags(tok, model)
 
-    raw = load_dataset("json", data_files={"train": str(DATA / "train.jsonl"),
-                                           "dev": str(DATA / "dev.lugbara.jsonl")})
-    raw["dev"] = raw["dev"].map(lambda r: {"src": f"{tag('lugbara')} {r['src']}"})
+    raw = load_dataset("json", data_files={"train": str(DATA / "train.jsonl")})
+    dev = load_dataset("json", data_files={"en": str(DATA / "dev.english-lugbara.jsonl"),
+                                           "lgg": str(DATA / "dev.lugbara-english.jsonl")})
+    from datasets import concatenate_datasets
+    raw["dev"] = concatenate_datasets([
+        dev["en"].map(lambda r: {"src": f"{tag('lugbara')} {r['src']}"}),
+        dev["lgg"].map(lambda r: {"src": f"{tag('english')} {r['src']}"})]).select_columns(["src", "tgt"])
+    raw["train"] = raw["train"].select_columns(["src", "tgt"])
 
     def enc(b):
         x = tok(b["src"], max_length=MAX_LEN, truncation=True)

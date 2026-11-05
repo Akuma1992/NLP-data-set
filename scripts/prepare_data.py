@@ -1,25 +1,24 @@
-"""Build train/dev/test files from Sunbird SALT (text-all).
+"""Build train/dev/test files from Sunbird SALT (text-all) for every direction in DIRECTIONS.
 
-Train = every English->Lugbara pair in SALT train, plus a replay sample of the four
-languages the Rutooro model already knows, so fine-tuning on Lugbara doesn't erase them.
+Train = all English<->Lugbara pairs, most Luganda->English pairs, and samples of the
+directions the Rutooro model already had, so they are kept while the new ones are learned.
 """
 import json
 import random
 
 from datasets import load_dataset
 
-from common import DATA, LANGS, NEW_LANG, SALT_REPO, normalize, tag
+from common import COLS, DATA, DIRECTIONS, SALT_REPO, dname, normalize, tag
 
-REPLAY_PER_LANG = 2000
 SEED = 13
 
 
-def rows(split, col):
+def pairs(split, src, tgt):
     out = []
     for r in split:
-        src, tgt = normalize(r["eng_source_text"]), normalize(r[col])
-        if src and tgt:
-            out.append({"id": r["id"], "src": src, "tgt": tgt})
+        s, t = normalize(r[COLS[src]]), normalize(r[COLS[tgt]])
+        if s and t:
+            out.append({"id": r["id"], "src": s, "tgt": t})
     return out
 
 
@@ -35,39 +34,33 @@ def main():
     ds = load_dataset(SALT_REPO, "text-all")
     print({k: len(v) for k, v in ds.items()})
 
-    train = []
-    stats = {}
-    for lang, col in LANGS.items():
-        tr = rows(ds["train"], col)
-        if lang != NEW_LANG:
-            random.shuffle(tr)
-            tr = tr[:REPLAY_PER_LANG]
-        for it in tr:
-            train.append({"lang": lang, "src": f"{tag(lang)} {it['src']}", "tgt": it["tgt"]})
-        dev = rows(ds["dev"], col)
-        test = rows(ds["test"], col)
-        write(DATA / f"dev.{lang}.jsonl", dev)
-        write(DATA / f"test.{lang}.jsonl", test)
-        stats[lang] = {"train": len(tr), "dev": len(dev), "test": len(test)}
-
-    # raw Lugbara side of the whole corpus, for the language analysis
-    lgg_all = []
-    for split in ("train", "dev", "test"):
-        for r in ds[split]:
-            t = normalize(r["lgg_text"])
-            if t:
-                lgg_all.append({"split": split, "id": r["id"], "eng": normalize(r["eng_source_text"]),
-                                "lgg": t, "raw": r["lgg_text"],
-                                **{k: normalize(r[c]) for k, c in LANGS.items() if k != NEW_LANG}})
-    write(DATA / "salt_lugbara_all.jsonl", lgg_all)
+    train, stats = [], {"directions": {}}
+    for src, tgt, n in DIRECTIONS:
+        d = dname(src, tgt)
+        tr = pairs(ds["train"], src, tgt)
+        random.shuffle(tr)
+        if n:
+            tr = tr[:n]
+        train += [{"dir": d, "src": f"{tag(tgt)} {it['src']}", "tgt": it["tgt"]} for it in tr]
+        dev, test = pairs(ds["dev"], src, tgt), pairs(ds["test"], src, tgt)
+        write(DATA / f"dev.{d}.jsonl", dev)
+        write(DATA / f"test.{d}.jsonl", test)
+        stats["directions"][d] = {"train": len(tr), "dev": len(dev), "test": len(test)}
 
     # how much of each SALT table actually has text for each language
-    coverage = {}
+    stats["coverage"] = {
+        split: {"rows": len(ds[split]),
+                **{lang: sum(1 for r in ds[split] if normalize(r[col])) for lang, col in COLS.items()}}
+        for split in ("train", "dev", "test")}
+
+    # whole corpus (all splits) with the Lugbara side kept raw, for the language analysis
+    allrows = []
     for split in ("train", "dev", "test"):
-        n = len(ds[split])
-        coverage[split] = {"rows": n, **{lang: sum(1 for r in ds[split] if normalize(r[col]))
-                                         for lang, col in LANGS.items()}}
-    stats["coverage"] = coverage
+        for r in ds[split]:
+            if normalize(r["lgg_text"]):
+                allrows.append({"split": split, "id": r["id"], "raw": r["lgg_text"],
+                                **{lang: normalize(r[col]) for lang, col in COLS.items()}})
+    write(DATA / "salt_all.jsonl", allrows)
 
     random.shuffle(train)
     write(DATA / "train.jsonl", train)
