@@ -78,7 +78,7 @@ THESIS = {
 }
 
 # ---------------------------------------------------------------- text
-APOS = re.compile("[’‘ʼʻ`´′]")
+APOS = re.compile("[’‘ʼʻ`´′ꞌꞋ]")   # incl. saltillo ꞌ, used in SALT Lugbara
 WS = re.compile(r"\s+")
 WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]*)*|'[^\W\d_]+", re.UNICODE)
 
@@ -400,7 +400,7 @@ def analyze(args):
            "top_words": lg["_c"].most_common(40)}
     raw = "".join(r.get("raw_lgg") or "" for r in rows)
     res["apostrophe_variants_raw"] = {f"U+{ord(k):04X} {unicodedata.name(k, '?')}": v
-                                      for k, v in Counter(ch for ch in raw if ch in "'’‘ʼʻ`´′").items()}
+                                      for k, v in Counter(ch for ch in raw if ch in "'’‘ʼʻ`´′ꞌꞋ").items()}
     text = " ".join(r["lugbara"] for r in rows)
     res["apostrophe_followed_by"] = Counter(m.group(1) for m in re.finditer(r"'([a-z])", text)).most_common(10)
     res["apostrophe_word_share"] = round(sum(v for w, v in lg["_c"].items() if "'" in w) / max(1, lg["words"]), 3)
