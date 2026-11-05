@@ -64,6 +64,17 @@ RUN_GRID = True      # thesis 3.4.3: learning-rate x batch-size grid search befo
 """),
         md("The full pipeline script (data sampling, grid search, training, scoring, analysis, card, upload)."),
         code("%%writefile lugbara_mt.py\n" + SCRIPT),
+        md("Stop the whole run as soon as any step fails (a failing `!command` does not stop a notebook by itself)."),
+        code("""
+ip = get_ipython()
+_system = ip.system
+def _strict_system(cmd):
+    _system(cmd)
+    if ip.user_ns.get("_exit_code", 0):
+        raise RuntimeError("step failed: " + cmd)
+ip.system = _strict_system
+print("steps will stop the run on failure")
+"""),
     ]
     if nb["copy_first"]:
         cells += [md("Copy the Rutooro model into the repo first; the trained model replaces it at the end."),

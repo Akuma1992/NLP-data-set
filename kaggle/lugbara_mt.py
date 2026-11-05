@@ -33,6 +33,7 @@ from pathlib import Path
 # one GPU only: Kaggle's "T4 x2" would otherwise split each batch over two GPUs and double
 # the effective batch size, which would distort the thesis's batch-size grid
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 WORK = Path(os.environ.get("LUGBARA_WORK", "/kaggle/working" if Path("/kaggle").exists() else "work"))
 DATA = WORK / "data"
@@ -227,7 +228,10 @@ def make_trainer(model_key, tok, model, train_rows, val_rows, lr, bs, out_dir, e
     tr = Dataset.from_list([{"src": r["src"], "tgt": r["tgt"]} for r in train_rows]).map(enc, batched=True, remove_columns=["src", "tgt"])
     va = Dataset.from_list([{"src": r["src"], "tgt": r["tgt"]} for r in val_rows]).map(enc, batched=True, remove_columns=["src", "tgt"])
     args = Seq2SeqTrainingArguments(
-        output_dir=str(out_dir), per_device_train_batch_size=bs, per_device_eval_batch_size=64,
+        # validation = loss only, small batches: keeping full-vocabulary (250k) logits for the
+        # whole validation set ran a 16 GB T4 out of memory
+        output_dir=str(out_dir), per_device_train_batch_size=bs, per_device_eval_batch_size=8,
+        prediction_loss_only=True,
         learning_rate=lr, optim=cfg["optim"], weight_decay=0.01, warmup_ratio=0.05,
         lr_scheduler_type="linear", num_train_epochs=epochs, max_steps=max_steps,
         fp16=cfg["fp16"] and not cpu, use_cpu=cpu, eval_strategy="epoch",
