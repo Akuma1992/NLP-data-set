@@ -48,9 +48,13 @@ uploads the model when it finishes; the browser can be closed.
 """),
         code('!pip install -q "transformers>=4.46,<5" "datasets>=2.19" sacrebleu sentencepiece protobuf accelerate'),
         code("""
+import re
 from kaggle_secrets import UserSecretsClient
 from huggingface_hub import login, whoami
-login(token=UserSecretsClient().get_secret("HF_TOKEN"), add_to_git_credential=False)
+raw = UserSecretsClient().get_secret("HF_TOKEN") or ""
+found = re.findall(r"hf_[A-Za-z0-9]{30,}", raw)
+print("HF_TOKEN secret check (the token itself is never printed):", len(raw), "characters; starts with hf_:", raw.strip().startswith("hf_"), "; contains '...':", "..." in raw, "; full-length tokens found:", len(found))
+login(token=found[0] if found else raw.strip(), add_to_git_credential=False)
 print("Signed in to Hugging Face as", whoami()["name"])
 """),
         code(f"""
