@@ -22,6 +22,11 @@ def code(text):
             "source": text.strip("\n").splitlines(keepends=True)}
 
 
+def with_ids(cells):
+    """Copies of the cells with unique ids (nbformat 4.5); shared cells appear in several notebooks."""
+    return [{**c, "id": f"c{i:03d}"} for i, c in enumerate(cells, 1)]
+
+
 def setup_md(title, body, repo, hours, gpu=True):
     steps = ["*Accelerator*: **GPU T4 x2** (only one GPU is used, so the batch sizes match the thesis)."] if gpu else \
             ["*Accelerator*: **None** (no GPU needed)."]
@@ -168,7 +173,7 @@ NOTEBOOKS = {
 
 for name, (fn, nb) in NOTEBOOKS.items():
     gpu = fn is not report
-    out = {"cells": fn(name, nb), "metadata": {
+    out = {"cells": with_ids(fn(name, nb)), "metadata": {
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
         "language_info": {"name": "python"},
         "kaggle": {"accelerator": "nvidiaTeslaT4" if gpu else "none", "isInternetEnabled": True, "isGpuEnabled": gpu}},
