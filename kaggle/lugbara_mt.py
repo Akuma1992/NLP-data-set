@@ -59,6 +59,16 @@ MODELS = {
         "grid_lr": [3e-5, 5e-5, 1e-4], "grid_bs": [16, 32],
         "lr": 5e-5, "bs": 16, "optim": "adamw_torch", "fp16": True,
         "license": "mit",
+        # v2 (v1 reached BLEU 0.3 and looped): longer grid probes, the randomly initialised
+        # cross-attention learns 10x faster, label smoothing, more patience, no repeat loops
+        "grid_epochs": 2, "patience": 5, "label_smoothing": 0.1,
+        "lr_mult": {"crossattention": 10.0},
+        "gen": {"no_repeat_ngram_size": 3, "repetition_penalty": 1.2},
+        "notes": ["Version 2: grid settings compared after 2 passes instead of 1; the cross-attention "
+                  "layers (new, randomly initialised) learn at 10x the grid learning rate; label "
+                  "smoothing 0.1; early-stopping patience 5; repeated 3-word phrases are blocked when "
+                  "generating. Version 1 (1-pass grid, patience 3, no repeat blocking) stopped at "
+                  "validation loss 4.46 and scored BLEU 0.29 / 0.16 because its output looped."],
     },
     "mt5": {
         "base": "google/mt5-base",
@@ -67,6 +77,7 @@ MODELS = {
         "grid_lr": [3e-4, 5e-4, 1e-3], "grid_bs": [8, 16],
         "lr": 5e-4, "bs": 16, "optim": "adafactor", "fp16": False,   # mT5 overflows in fp16
         "license": "apache-2.0",
+        "grid_epochs": 1, "patience": 3, "label_smoothing": 0.0, "lr_mult": {}, "gen": {}, "notes": [],
     },
 }
 MAX_LEN = 128
@@ -204,7 +215,45 @@ def build(model_key, base=None, from_dir=None):
         model = AutoModelForSeq2SeqLM.from_pretrained(base)
     g = model.generation_config
     g.max_length, g.num_beams, g.early_stopping = MAX_LEN, 4, True
+    for k, v in cfg.get("gen", {}).items():
+        setattr(g, k, v)
     return tok, model
+
+
+def group_lr_trainer_class(base_cls):
+    """Trainer whose optimiser gives parameter groups their own learning rates.
+
+    `lr_mult` maps a name fragment to a multiplier of the base learning rate (first match wins);
+    other trainable parameters use the base rate. Bias/LayerNorm get no weight decay.
+    """
+    class GroupLRTrainer(base_cls):
+        lr_mult = {}
+        optimizer_kind = "adamw"
+
+        def create_optimizer(self):
+            if self.optimizer is not None or not self.lr_mult:
+                return super().create_optimizer()
+            import torch
+            from transformers.optimization import Adafactor
+            groups = {}
+            for n, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                mult = next((m for frag, m in self.lr_mult.items() if frag in n), 1.0)
+                no_decay = n.endswith(".bias") or "LayerNorm" in n or "layer_norm" in n
+                groups.setdefault((mult, no_decay), []).append(p)
+            lr = self.args.learning_rate
+            pg = [{"params": ps, "lr": lr * m, "weight_decay": 0.0 if nd else self.args.weight_decay}
+                  for (m, nd), ps in groups.items()]
+            if self.optimizer_kind == "adafactor":
+                self.optimizer = Adafactor(pg, lr=lr, scale_parameter=False, relative_step=False,
+                                           warmup_init=False)
+            else:
+                self.optimizer = torch.optim.AdamW(pg, lr=lr)
+            print("optimizer groups:", [(round(g["lr"], 8), sum(p.numel() for p in g["params"]))
+                                        for g in pg], flush=True)
+            return self.optimizer
+    return GroupLRTrainer
 
 
 def encode_fn(tok, model_key):
@@ -238,11 +287,15 @@ def make_trainer(model_key, tok, model, train_rows, val_rows, lr, bs, out_dir, e
         save_strategy="epoch" if save else "no",
         save_total_limit=2, load_best_model_at_end=early_stop, metric_for_best_model="eval_loss",
         greater_is_better=False, logging_steps=50, report_to="none", seed=SEED,
+        label_smoothing_factor=cfg.get("label_smoothing", 0.0),
         group_by_length=True, dataloader_num_workers=2 if not cpu else 0)
-    cbs = [EarlyStoppingCallback(early_stopping_patience=3)] if early_stop else []
-    return Seq2SeqTrainer(model=model, args=args, train_dataset=tr, eval_dataset=va,
-                          data_collator=DataCollatorForSeq2Seq(tok, model=model), callbacks=cbs,
-                          processing_class=tok)
+    cbs = [EarlyStoppingCallback(early_stopping_patience=cfg.get("patience", 3))] if early_stop else []
+    trainer_cls = group_lr_trainer_class(Seq2SeqTrainer)
+    trainer_cls.lr_mult = cfg.get("lr_mult", {})
+    trainer_cls.optimizer_kind = "adafactor" if cfg["optim"] == "adafactor" else "adamw"
+    return trainer_cls(model=model, args=args, train_dataset=tr, eval_dataset=va,
+                       data_collator=DataCollatorForSeq2Seq(tok, model=model), callbacks=cbs,
+                       processing_class=tok)
 
 
 def translate(tok, model, srcs, bs=32, beams=4):
@@ -316,7 +369,7 @@ def grid(args):
             t0 = time.time()
             tok, model = build(args.model, args.base)
             tr = make_trainer(args.model, tok, model, train_rows, val_rows, lr, bs,
-                              OUT / args.model / "grid_tmp", epochs=args.grid_epochs,
+                              OUT / args.model / "grid_tmp", epochs=args.grid_epochs or cfg.get("grid_epochs", 1),
                               cpu=device_is_cpu(), early_stop=False, max_steps=args.max_steps, save=False)
             tr.train()
             hyps = translate(tok, model, [r["src"] for r in probe], beams=1)
@@ -434,7 +487,18 @@ def analyze(args):
             split_apos += any(p == "'" for p in pcs)
         res["tokenizers"][key] = {"pieces_per_word": fit,
                                   "apostrophe_cut_off_share": round(split_apos / max(1, len(apos_words)), 3)}
-    (OUT / "lugbara_analysis.json").parent.mkdir(parents=True, exist_ok=True)
+    # words-per-sentence distribution (capped at 40) for the length chart
+    res["length_hist"] = {}
+    for lang in COLS:
+        cnt = Counter(min(40, len(words(r[lang]))) for r in rows)
+        res["length_hist"][lang] = {str(n): cnt.get(n, 0) for n in range(1, 41)}
+    OUT.mkdir(parents=True, exist_ok=True)
+    try:
+        import lugbara_plots
+        res["figures"] = [p.name for p in lugbara_plots.data_figures(res, OUT / "figures")]
+    except Exception as e:   # plotting must never stop a training run
+        print("data figures skipped:", type(e).__name__, e)
+        res["figures"] = []
     (OUT / "lugbara_analysis.json").write_text(json.dumps(res, indent=1, ensure_ascii=False), encoding="utf-8")
     (OUT / "LUGBARA_ANALYSIS.md").write_text(render_analysis(res), encoding="utf-8")
     print("wrote", OUT / "LUGBARA_ANALYSIS.md")
@@ -447,6 +511,8 @@ def md_table(rows, head):
 
 def render_analysis(r):
     c, s = r["corpus"], r["stats"]
+    figs = set(r.get("figures") or [])
+    fig = lambda name, alt: [f"![{alt}](figures/{name})", ""] if name in figs else []
     L = ["# Lugbara language analysis", "",
          "Measured on the 15,524 SALT sentences used to train these models (the thesis-sized sample "
          "described in the model card). Produced by `lugbara_mt.py analyze`.", "",
@@ -472,9 +538,12 @@ def render_analysis(r):
                    "Share of words seen once", "Word tokens ending in a vowel"]), "",
          f"The same sentences take **{c['lugbara']['mean_len']} words** in Lugbara, "
          f"{c['english']['mean_len']} in English and {c['luganda']['mean_len']} in Luganda.", "",
+         *fig("data_sentence_length.png", "Words per sentence in English, Lugbara and Luganda"),
          "### Most frequent Lugbara words", "",
+         *fig("data_top_lugbara_words.png", "Most frequent Lugbara words"),
          ", ".join(f"`{w}` ({n})" for w, n in r["top_words"]), "",
          "## Spelling", "",
+         *fig("data_apostrophe_letters.png", "Letters following the Lugbara apostrophe"),
          f"* Word tokens containing an apostrophe: **{100 * r['apostrophe_word_share']:.1f}%**",
          "* Apostrophe followed by: " + ", ".join(f"`'{k}` {v}" for k, v in r["apostrophe_followed_by"]),
          "* Apostrophe characters in the raw SALT text (all folded to `'`): "
@@ -486,6 +555,7 @@ def render_analysis(r):
                   ["Pair", "Shared top-2,000 words"]), "",
          "## How the thesis models' tokenizers cut Lugbara", ""]
     if r["tokenizers"]:
+        L += fig("data_tokenizer_pieces.png", "Sub-word pieces per word for each tokenizer")
         L += [md_table([["XLM-R" if k == "xlmr" else "mT5", *[v["pieces_per_word"].get(l, "") for l in COLS],
                          f"{100 * v['apostrophe_cut_off_share']:.1f}%"] for k, v in r["tokenizers"].items()],
                        ["Tokenizer", "Pieces/word English", "Pieces/word Lugbara", "Pieces/word Luganda",
@@ -522,6 +592,12 @@ def card(args):
     first_test = jl_read(OUT / args.model / f"test_outputs.{ex_src}-{ex_tgt}.jsonl")[:8]
     usage = "\n".join(f'print(translate("{r["src"].split(" ", 1)[1]}", "{r["src"].split(" ", 1)[0]}"))'
                       for r in first_test[:2])
+    notes = "".join(f"* {n}\n" for n in cfg.get("notes", []))
+    figdir = OUT / args.model / "figures"
+    figs_md = "".join(f"![{alt}](figures/{name})\n\n" for name, alt in (
+        ("test_scores.png", "Test scores"), ("quality_by_length.png", "Quality by sentence length"),
+        ("training.png", "Training and validation loss"), ("grid_search.png", "Grid search"))
+        if (figdir / name).exists())
     md = f"""---
 language: [{", ".join(langs)}]
 license: {cfg['license']}
@@ -569,6 +645,7 @@ integrity is the share of apostrophe words in the reference (`'ba`, `a'dule` …
 \\*The thesis scores were measured on the thesis's own corpus, not on SALT, so they are a
 reference point rather than a like-for-like comparison.
 
+{figs_md}
 ### Sample test translations ({ex_src.title()} → {ex_tgt.title()})
 
 {md_table([[r["src"].split(" ", 1)[1], r["ref"], r["hyp"]] for r in first_test], ["Source", "Reference", "Model"])}
@@ -586,9 +663,10 @@ reference point rather than a like-for-like comparison.
 * **Hyperparameters (thesis §3.4.3):** grid search over learning rate × batch size
   ({", ".join(f"{g['lr']:g}/{g['batch_size']} → {g['val_bleu']} BLEU" for g in grid_res) or "not run"}),
   then fine-tuning with lr {tlog['lr']:g}, batch {tlog['batch_size']}, optimiser {cfg['optim']},
-  early stopping on validation loss (patience 3); {tlog['global_step']:,} steps,
+  early stopping on validation loss (patience {cfg.get('patience', 3)}); {tlog['global_step']:,} steps,
   {tlog['minutes']} minutes on a Kaggle GPU.
 
+{notes}
 See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md) for the Lugbara language analysis of the training data.
 
 ## Limits
@@ -608,6 +686,25 @@ See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md) for the Lugbara language analysis
     print("wrote card for", repo)
 
 
+def plots(args):
+    """Grid, training, test-score and length figures for one model (shown inline by the notebook)."""
+    import lugbara_plots
+    paths = lugbara_plots.model_figures(OUT / args.model, MODELS[args.model]["title"].split(" ")[0], THESIS)
+    for p in paths:
+        print("figure", p)
+
+
+def copy_figures_and_outputs(model_out, folder):
+    """Data figures + this model's figures -> figures/, test outputs -> test_outputs/."""
+    (folder / "figures").mkdir(parents=True, exist_ok=True)
+    for src in (OUT / "figures", model_out / "figures"):
+        for p in src.glob("*.png") if src.exists() else []:
+            shutil.copy(p, folder / "figures" / p.name)
+    (folder / "test_outputs").mkdir(exist_ok=True)
+    for p in model_out.glob("test_outputs.*.jsonl"):
+        shutil.copy(p, folder / "test_outputs" / p.name)
+
+
 def push(args):
     from huggingface_hub import HfApi
     api = HfApi()
@@ -618,6 +715,7 @@ def push(args):
     for f in ("scores.json", "train_log.json", "grid.json"):
         if (OUT / args.model / f).exists():
             shutil.copy(OUT / args.model / f, folder / f)
+    copy_figures_and_outputs(OUT / args.model, folder)
     api.create_repo(args.repo, exist_ok=True, private=False)
     # replace whatever was there before (e.g. the Rutooro copy), keep .gitattributes
     api.upload_folder(folder_path=str(folder), repo_id=args.repo,
@@ -662,6 +760,7 @@ def smoke(args):
     train(ns)
     evaluate(ns)
     analyze(ns)
+    plots(ns)
     card(ns)
     # reload check
     tok, model = build(args.model, from_dir=OUT / args.model / "model")
@@ -670,21 +769,21 @@ def smoke(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prepare", "grid", "train", "evaluate", "analyze", "card", "push", "copy", "smoke"])
+    ap.add_argument("cmd", choices=["prepare", "grid", "train", "evaluate", "analyze", "plots", "card", "push", "copy", "smoke"])
     ap.add_argument("--model", choices=list(MODELS), default="xlmr")
     ap.add_argument("--base", help="local path or hub id overriding the base model")
     ap.add_argument("--base-root", type=Path, help="smoke: folder holding xlmr/ and mt5/ tokenizers")
     ap.add_argument("--repo")
     ap.add_argument("--fake", type=int, default=0)
     ap.add_argument("--epochs", type=float, default=30)
-    ap.add_argument("--grid-epochs", type=float, default=1)
+    ap.add_argument("--grid-epochs", type=float, default=None, help="default: MODELS[model]['grid_epochs']")
     ap.add_argument("--probe", type=int, default=300, help="validation sentences scored per grid point")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-grid", action="store_true")
     args = ap.parse_args()
     random.seed(SEED)
-    {"prepare": prepare, "grid": grid, "train": train, "evaluate": evaluate, "analyze": analyze,
+    {"prepare": prepare, "grid": grid, "train": train, "evaluate": evaluate, "analyze": analyze, "plots": plots,
      "card": card, "push": push, "copy": copy, "smoke": smoke}[args.cmd](args)
 
 
