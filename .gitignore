@@ -1,0 +1,7 @@
+.venv/
+source-model/
+lugbara-model/
+checkpoints/
+data/
+__pycache__/
+analysis/outputs.*
