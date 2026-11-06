@@ -315,7 +315,7 @@ def compare_figure(score_sets, out_path, metric="bleu", title=None, note=None):
     return _save(fig, out_path, note=note or "Same SALT test split for every model.")
 
 
-def dataset_figure(comparison, out_path, model_name):
+def dataset_figure(comparison, out_path, model_name, subtitle=None):
     """Cross-test (compare.json): bars = training corpus, groups = test split; BLEU and chrF per direction."""
     _style()
     table = comparison["table"]
@@ -341,7 +341,8 @@ def dataset_figure(comparison, out_path, model_name):
             ax.grid(axis="x", visible=False)
             if r == 0 and c == 0:
                 ax.legend(loc="upper left")
-    fig.suptitle(f"{model_name}: trained on SALT vs trained on the local corpus", x=0.01, ha="left",
+    fig.suptitle(f"{model_name}: trained on SALT vs trained on the local corpus"
+                 + (f" ({subtitle})" if subtitle else ""), x=0.01, ha="left",
                  fontsize=12, fontweight="bold", color=INK)
     return _save(fig, out_path, note="Same model and settings, trained once on each corpus; each bar is one model "
                                      "scored on one test split.")

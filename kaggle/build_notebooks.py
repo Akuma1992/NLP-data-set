@@ -7,6 +7,7 @@
 05  mT5     Lugbara -> English on the local corpus, cross-tested against the SALT-trained mT5
 06  XLM-R   English -> Lugbara on the local corpus, cross-tested against the SALT-trained XLM-R (v1)
 07  Fusion  XLM-R + mT5, English <-> Lugbara on the local corpus, cross-tested against the SALT fusion
+08  Update  after 05 + 06: the SALT-vs-local comparison also on the sentences the corpora do not share
 """
 import json
 from pathlib import Path
@@ -144,6 +145,7 @@ REPO = "{nb["repo"]}"
             code("""
 !python lugbara_mt.py evaluate --model $MODEL --on salt --name on_salt
 !python lugbara_mt.py evaluate --model $MODEL --counterpart --on local --name salt_model_on_local
+!python lugbara_mt.py evaluate --model $MODEL --counterpart --on salt --name salt_model_on_salt
 !python lugbara_mt.py compare --model $MODEL
 """),
             md("## 5. Plots: training curves, test scores, quality by length, SALT vs local"),
@@ -210,6 +212,35 @@ P.show(sorted(Path('out/fusion_local/figures').glob('*.png')))
 !python fusion_mt.py card --dataset local --repo $REPO
 !python fusion_mt.py push --dataset local --repo $REPO
 """)]
+
+
+def unshared_update(name, nb):
+    """After 05 and 06 have published: score each SALT twin on the SALT test split, redo the 2 x 2 also on
+    the sentences the corpora do not share, and update those two repos' cards (weights untouched)."""
+    cells = [setup_md(nb["title"], nb["body"], None, nb["hours"]), PIP, LOGIN,
+             *writefiles("lugbara_mt.py", "lugbara_plots.py"), *STRICT,
+             md("## 1. Data: the local corpus split and the SALT sample (same seed as the training runs)"),
+             code("""
+!python lugbara_mt.py prepare --dataset local
+!python lugbara_mt.py prepare
+""")]
+    for i, (model, repo, label) in enumerate(nb["runs"], 2):
+        cells += [
+            md(f"## {i}. {label}: fetch the published results, score the SALT twin on the SALT test split, "
+               "compare on all and on unshared sentences, update the card"),
+            code(f"""
+!python lugbara_mt.py fetch --model {model} --repo {repo}
+!python lugbara_mt.py evaluate --model {model} --counterpart --on salt --name salt_model_on_salt
+!python lugbara_mt.py compare --model {model}
+!python lugbara_mt.py card --model {model} --repo {repo}
+!python lugbara_mt.py push --model {model} --repo {repo} --meta-only
+"""),
+            code(f"""
+import lugbara_plots as P
+from pathlib import Path
+P.show(sorted(Path('out/{model}/figures').glob('salt_vs_local*.png')))
+""")]
+    return cells
 
 
 def report(name, nb):
@@ -281,6 +312,16 @@ NOTEBOOKS = {
                 "settings of the SALT-trained fusion model. It is then tested on both test splits, and the SALT-trained "
                 "fusion model ([ckuma/lugbara-ensemble-translator](https://huggingface.co/ckuma/lugbara-ensemble-translator)) "
                 "is tested on the local split."}),
+    "08_unshared_cross_tests.ipynb": (unshared_update, {
+        "title": "SALT vs local corpus: cross-tests on the sentences the two corpora do not share",
+        "hours": "about 30–60 minutes",
+        "runs": [("mt5_local", "ckuma/lugbara-english-translator-local", "mT5 (Lugbara → English)"),
+                 ("xlmr_local", "ckuma/lugbara-multilingual-translator-local", "XLM-R (English → Lugbara)")],
+        "body": "Run after notebooks 05 and 06 have published. About 6,100 of the 14,277 local pairs share their English "
+                "sentence with the SALT sample, so roughly 30% of each test split was seen in training by the model "
+                "trained on the *other* corpus. This notebook scores the SALT-trained twins on the SALT test split, "
+                "repeats the 2 × 2 comparison on only the unshared test sentences, and updates the two model cards "
+                "(the model weights are not touched)."}),
 }
 
 for name, (fn, nb) in NOTEBOOKS.items():

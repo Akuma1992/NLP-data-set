@@ -19,6 +19,7 @@ Subcommands (run in order; see the Kaggle notebooks):
   compare  --model M            *_local models: trained on SALT vs local corpus x tested on both (2 x 2)
   analyze  [--dataset local]    Lugbara language analysis -> LUGBARA_ANALYSIS.md
   card     --model M            README.md model card
+  fetch    --model M --repo R   download a published run's results (no weights) to redo compare + card
   push     --model M --repo R   upload the trained model, card and analysis
   copy     --repo R             copy mmuniversity/rutooro-multilingual-translator into R
   smoke    --model M --base DIR tiny synthetic run on CPU to check the code end to end
@@ -579,33 +580,86 @@ def hub_link(cp):
            (f"/tree/{cp['revision']})" if cp.get("revision") else ")")
 
 
+def english_of(row, src, tgt):
+    """The English side of a test-output row (reference when translating into English, else the source)."""
+    return row["ref"] if tgt == "english" else row["src"].split(" ", 1)[1]
+
+
+def cross_outputs(d, cell, dname):
+    """Test-output file of one 2 x 2 cell (see CROSS) for one direction."""
+    return d / Path(CROSS[cell]).parent / f"test_outputs.{dname}.jsonl"
+
+
+def unshared_table(d, directions):
+    """The 2 x 2 again, each test split cut to the sentences whose English is NOT in the other corpus's
+    training split, so no cross-test cell can be helped by sentences its model saw in training.
+    Needs both splits prepared and every cell's test outputs; returns ({}, {}) otherwise."""
+    if not ((DATA / "train.jsonl").exists() and (DATA_LOCAL / "train.jsonl").exists()):
+        return {}, {}
+    eng_train = {n: {r["english"] for r in jl_read(data_dir(n) / "train.jsonl")} for n in ("salt", "local")}
+    other = {"salt": "local", "local": "salt"}
+    table, sizes = {}, {}
+    for src, tgt in directions:
+        dname = f"{src}-{tgt}"
+        for cell in CROSS:
+            p = cross_outputs(d, cell, dname)
+            if not p.exists():
+                continue
+            test_on = cell[1]
+            rows = [r for r in jl_read(p) if english_of(r, src, tgt) not in eng_train[other[test_on]]]
+            if rows:
+                res = score([r["hyp"] for r in rows], [r["ref"] for r in rows], tgt)
+                table.setdefault(dname, {})[f"{cell[0]}>{test_on}"] = res
+                sizes.setdefault(dname, {})[test_on] = len(rows)
+    return table, sizes
+
+
 def cross_table(d, cp, directions, model_name):
-    """The 2 x 2 table for a local-corpus run whose cross-test scores are under d (see CROSS)."""
+    """The 2 x 2 table for a local-corpus run whose cross-test scores are under d (see CROSS), on the
+    full test splits and on the sentences the two corpora do not share."""
+    from huggingface_hub import hf_hub_download
     ss = d / CROSS[("salt", "salt")]
+    ss.parent.mkdir(parents=True, exist_ok=True)
     if not ss.exists():
-        from huggingface_hub import hf_hub_download
-        ss.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(hf_hub_download(cp["repo"], "scores.json", revision=cp["revision"]), ss)
         (ss.parent / "about.json").write_text(json.dumps(
             {"model": cp["repo"], "revision": cp["revision"], "test_set": "salt",
              "note": "published test scores of the SALT-trained model"}, indent=2))
     dirs = [f"{a}-{b}" for a, b in directions]
+    for dname in dirs:      # the SALT model's own SALT test outputs, when it published them
+        f = cross_outputs(d, ("salt", "salt"), dname)
+        if not f.exists():
+            try:
+                shutil.copy(hf_hub_download(cp["repo"], f"test_outputs/test_outputs.{dname}.jsonl",
+                                            revision=cp["revision"]), f)
+            except Exception as e:
+                print(f"no published SALT test outputs for {dname} ({type(e).__name__}); run "
+                      "evaluate --counterpart --on salt --name salt_model_on_salt for the unshared table")
     table = {}
     for (train_on, test_on), rel in CROSS.items():
         if (d / rel).exists():
             for dname, v in json.loads((d / rel).read_text()).items():
                 if dname in dirs:
                     table.setdefault(dname, {})[f"{train_on}>{test_on}"] = v
-    out = {"model": d.name, "counterpart": cp, "table": table,
-           "rows": "trained on", "columns": "tested on"}
+    t2, sizes = unshared_table(d, directions)
+    out = {"model": d.name, "counterpart": cp, "table": table, "rows": "trained on", "columns": "tested on",
+           "table_unshared": t2, "unshared_sentences": sizes,
+           "unshared_note": "each test split cut to the sentences whose English is not in the other corpus's training split"}
     (d / "comparison.json").write_text(json.dumps(out, indent=2))
-    for dname, cells in table.items():
-        print(dname)
-        for k, v in cells.items():
-            print(f"  trained on {k.split('>')[0]:5s}  tested on {k.split('>')[1]:5s}  BLEU {v['bleu']:6.2f}  chrF {v['chrf']:6.2f}")
+    for name, tb in (("all test sentences", table), ("sentences not shared between the corpora", t2)):
+        print(f"--- {name}")
+        for dname, cells in tb.items():
+            print(dname, sizes.get(dname, "") if tb is t2 else "")
+            for k, v in cells.items():
+                print(f"  trained on {k.split('>')[0]:5s}  tested on {k.split('>')[1]:5s}  "
+                      f"BLEU {v['bleu']:6.2f}  chrF {v['chrf']:6.2f}  (n={v['n']})")
     try:
         import lugbara_plots
         print("figure", lugbara_plots.dataset_figure(out, d / "figures" / "salt_vs_local.png", model_name))
+        if t2:
+            print("figure", lugbara_plots.dataset_figure(
+                {**out, "table": t2}, d / "figures" / "salt_vs_local_unshared.png", model_name,
+                subtitle="test sentences the two corpora do not share"))
     except Exception as e:  # plotting must never stop a run
         print("comparison figure skipped:", type(e).__name__, e)
     return out
@@ -618,30 +672,55 @@ def cross_section_md(d, cp, what="model"):
         return ""
     comp = json.loads(cpath.read_text())
     cell = lambda cells, k: f"{cells[k]['bleu']} / {cells[k]['chrf']}" if k in cells else "–"
-    trows = []
-    for dname, cells in comp["table"].items():
-        trows.append([dname.replace("-", " → ").title(), f"SALT ({hub_link(cp)})",
-                      cell(cells, "salt>salt"), cell(cells, "salt>local")])
-        trows.append(["", f"Local corpus (this {what})", cell(cells, "local>salt"), cell(cells, "local>local")])
-    unseen = ""
+
+    def rows_of(table):
+        trows = []
+        for dname, cells in table.items():
+            trows.append([dname.replace("-", " → ").title(), f"SALT ({hub_link(cp)})",
+                          cell(cells, "salt>salt"), cell(cells, "salt>local")])
+            trows.append(["", f"Local corpus (this {what})", cell(cells, "local>salt"), cell(cells, "local>local")])
+        return trows
+    notes = ""
     apath = OUT / "lugbara_analysis.json"
     vs = json.loads(apath.read_text(encoding="utf-8")).get("vs_salt") if apath.exists() else None
     if vs:
-        u = vs["unseen_test_words"]["lugbara"]
-        unseen = (f"\nLugbara word tokens of each test split that never occur in the training split: "
-                  f"SALT test {100 * u['salt>salt']:.1f}% (SALT train) vs {100 * u['local>salt']:.1f}% (local train); "
-                  f"local test {100 * u['local>local']:.1f}% (local train) vs {100 * u['salt>local']:.1f}% (SALT train). "
-                  "See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md).\n")
+        u, same, n = vs["unseen_test_words"]["lugbara"], vs["same_english_sentence"], vs["test_sentences"]
+        notes = (f"\n**Shared sentences.** {same['local_in_salt']:,} of the {vs['sentences']['local']:,} local pairs have an "
+                 f"English sentence that is also in the SALT sample: {same['local_test_in_salt_train']:,} of the "
+                 f"{n['local']:,} local test sentences are in SALT's training split, and "
+                 f"{same['salt_test_in_local_train']:,} of the {n['salt']:,} SALT test sentences are in the local "
+                 "training split, so the cross-test cells above are partly helped by sentences seen in training. "
+                 "The table below repeats the comparison without them.\n\n"
+                 f"Lugbara word tokens of each test split that never occur in the training split: "
+                 f"SALT test {100 * u['salt>salt']:.1f}% (SALT train) vs {100 * u['local>salt']:.1f}% (local train); "
+                 f"local test {100 * u['local>local']:.1f}% (local train) vs {100 * u['salt>local']:.1f}% (SALT train). "
+                 "See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md).\n")
     fig = "![SALT vs local corpus](figures/salt_vs_local.png)\n" if (d / "figures" / "salt_vs_local.png").exists() else ""
+    unshared = ""
+    if comp.get("table_unshared"):
+        sizes = comp.get("unshared_sentences", {})
+        first = next(iter(sizes.values()), {})
+        fig2 = ("![SALT vs local corpus, unshared sentences](figures/salt_vs_local_unshared.png)\n"
+                if (d / "figures" / "salt_vs_local_unshared.png").exists() else "")
+        unshared = f"""
+### Only the test sentences the two corpora do not share
+
+Each test split cut to the sentences whose English is not in the other corpus's training split
+({first.get('salt', '?'):,} SALT test and {first.get('local', '?'):,} local test sentences), so every cell is scored on
+sentences none of the models saw in training.
+
+{md_table(rows_of(comp["table_unshared"]), ["Direction", "Trained on", "SALT test (unshared)", "Local test (unshared)"])}
+
+{fig2}"""
     return f"""
 ## Trained on SALT vs trained on the local corpus
 
 The same {what} with the same settings, trained once on each corpus and tested on both test splits
 (BLEU / chrF; the SALT test split is the {N_TOTAL - N_TRAIN - N_VAL:,}-sentence split of the thesis-sized SALT sample).
 
-{md_table(trows, ["Direction", "Trained on", "SALT test", "Local test"])}
+{md_table(rows_of(comp["table"]), ["Direction", "Trained on", "SALT test", "Local test"])}
 
-{fig}{unseen}"""
+{fig}{notes}{unshared}"""
 
 
 # ---------------------------------------------------------------- analysis
@@ -1059,10 +1138,51 @@ def copy_figures_and_outputs(model_out, folder):
                 shutil.copy(p, dest / p.name)
 
 
+def fetch(args):
+    """Download a published run's results (no model weights) into out/MODEL, so the comparison and the
+    card can be redone without retraining (e.g. after adding the unshared-sentence table)."""
+    from huggingface_hub import snapshot_download
+    d = OUT / args.model
+    snap = Path(snapshot_download(args.repo, local_dir=str(WORK / "fetch" / args.model), allow_patterns=[
+        "scores.json", "train_log.json", "grid.json", "comparison.json", "lugbara_analysis.json",
+        "LUGBARA_ANALYSIS.md", "test_outputs/*", "cross_tests/*/*", "figures/*"]))
+    (d / "model").mkdir(parents=True, exist_ok=True)
+    (d / "figures").mkdir(exist_ok=True)
+    for f in ("scores.json", "train_log.json", "grid.json", "comparison.json"):
+        if (snap / f).exists():
+            shutil.copy(snap / f, d / f)
+    for f in ("lugbara_analysis.json", "LUGBARA_ANALYSIS.md"):
+        if (snap / f).exists():
+            shutil.copy(snap / f, OUT / f)
+    for p in (snap / "test_outputs").glob("*.jsonl"):
+        shutil.copy(p, d / p.name)
+    for sub in (snap / "cross_tests").glob("*"):
+        if sub.is_dir():
+            (d / "cross" / sub.name).mkdir(parents=True, exist_ok=True)
+            for p in sub.iterdir():
+                shutil.copy(p, d / "cross" / sub.name / p.name)
+    for p in (snap / "figures").glob("*.png"):
+        shutil.copy(p, d / "figures" / p.name)
+    print("fetched", args.repo, "->", d)
+
+
 def push(args):
     from huggingface_hub import HfApi
     api = HfApi()
     cfg = MODELS[args.model]
+    if getattr(args, "meta_only", False):
+        # card, comparison, charts and test outputs only; the model weights stay as they are
+        folder = OUT / args.model / "meta"
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        shutil.copy(OUT / args.model / "model" / "README.md", folder / "README.md")
+        if (OUT / args.model / "comparison.json").exists():
+            shutil.copy(OUT / args.model / "comparison.json", folder / "comparison.json")
+        copy_figures_and_outputs(OUT / args.model, folder)
+        api.upload_folder(folder_path=str(folder), repo_id=args.repo,
+                          commit_message="SALT vs local cross-test also on the sentences the two corpora do not share")
+        print("updated card and results of", f"https://huggingface.co/{args.repo}")
+        return
     folder = OUT / args.model / "model"
     for f in ("LUGBARA_ANALYSIS.md", "lugbara_analysis.json"):
         if (OUT / f).exists():
@@ -1149,7 +1269,7 @@ def smoke(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["prepare", "grid", "train", "evaluate", "compare", "analyze", "plots", "card",
-                                    "push", "copy", "smoke"])
+                                    "fetch", "push", "copy", "smoke"])
     ap.add_argument("--model", choices=list(MODELS), default="xlmr")
     ap.add_argument("--dataset", choices=["salt", "local"], default=None,
                     help="prepare/analyze: SALT sample (default) or the local corpus")
@@ -1168,10 +1288,12 @@ def main():
     ap.add_argument("--from-repo", help="evaluate: any published model (hub id or folder)")
     ap.add_argument("--revision", help="evaluate: revision of --from-repo")
     ap.add_argument("--name", help="evaluate: write to out/MODEL/cross/NAME/")
+    ap.add_argument("--meta-only", action="store_true", help="push: card, comparison and charts only (no weights)")
     args = ap.parse_args()
     random.seed(SEED)
     {"prepare": prepare, "grid": grid, "train": train, "evaluate": evaluate, "compare": compare,
-     "analyze": analyze, "plots": plots, "card": card, "push": push, "copy": copy, "smoke": smoke}[args.cmd](args)
+     "analyze": analyze, "plots": plots, "card": card, "fetch": fetch, "push": push, "copy": copy,
+     "smoke": smoke}[args.cmd](args)
 
 
 if __name__ == "__main__":
