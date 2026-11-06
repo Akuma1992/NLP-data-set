@@ -1,0 +1,18 @@
+{
+  "architecture": "XLM-R + mT5 dual-encoder fusion",
+  "mt5": "google/mt5-base",
+  "xlmr": "FacebookAI/xlm-roberta-base",
+  "directions": [
+    "english-lugbara",
+    "english-luganda",
+    "lugbara-english",
+    "luganda-english"
+  ],
+  "tags": {
+    "english": "<2en>",
+    "lugbara": "<2lgg>",
+    "luganda": "<2lug>"
+  },
+  "lowercase": true,
+  "max_len": 128
+}

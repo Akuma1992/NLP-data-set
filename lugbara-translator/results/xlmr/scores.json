@@ -1,0 +1,17 @@
+{
+  "english-lugbara": {
+    "n": 2328,
+    "bleu": 0.0,
+    "ter": 99.94,
+    "chrf": 0.85,
+    "word_f1": 0.0016,
+    "apostrophe_integrity": 0.0035
+  },
+  "english-luganda": {
+    "n": 2328,
+    "bleu": 0.0,
+    "ter": 99.88,
+    "chrf": 0.96,
+    "word_f1": 0.0047
+  }
+}

@@ -1,0 +1,45 @@
+{
+ "model": "source-model",
+ "tags": {
+  "lugbara": {
+   "first_id": 1,
+   "first_token": "<unk>"
+  },
+  "rutooro": {
+   "first_id": 1,
+   "first_token": "<unk>"
+  },
+  "luganda": {
+   "first_id": 1,
+   "first_token": "<unk>"
+  },
+  "acholi": {
+   "first_id": 1,
+   "first_token": "<unk>"
+  },
+  "runyankore": {
+   "first_id": 1,
+   "first_token": "<unk>"
+  }
+ },
+ "outputs": {
+  "Education is important for community development.": {
+   "lugbara": "Okusoma ku mugaso mu nkulaakulana y'ekitundu.",
+   "rutooro": "Okusoma ku mugaso mu nkulaakulana y'ekitundu.",
+   "luganda": "Okusoma ku mugaso mu nkulaakulana y'ekitundu.",
+   "acholi": "Okusoma ku mugaso mu nkulaakulana y'ekitundu.",
+   "runyankore": "Okusoma ku mugaso mu nkulaakulana y'ekitundu."
+  },
+  "The market opens early in the morning.": {
+   "lugbara": "Akatale kakingirweho makya.",
+   "rutooro": "Akatale kakingirweho makya.",
+   "luganda": "Akatale kakingirweho makya.",
+   "acholi": "Akatale kakingirweho makya.",
+   "runyankore": "Akatale kakingirweho makya."
+  }
+ },
+ "distinct_outputs_per_sentence": {
+  "Education is important for community development.": 1,
+  "The market opens early in the morning.": 1
+ }
+}
