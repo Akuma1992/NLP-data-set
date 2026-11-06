@@ -1,0 +1,348 @@
+{
+ "stats": {
+  "salt_rows": 24943,
+  "salt_nonempty": {
+   "english": 24943,
+   "lugbara": 24943,
+   "luganda": 24943
+  },
+  "clean_rows": 24585,
+  "dropped": {
+   "malformed": 355,
+   "duplicate": 3
+  },
+  "seed": 13,
+  "split_sizes": {
+   "train": 10867,
+   "val": 2329,
+   "test": 2328
+  },
+  "lowercase": true
+ },
+ "corpus": {
+  "english": {
+   "sentences": 15524,
+   "words": 141905,
+   "distinct": 9328,
+   "ttr": 0.0657,
+   "hapax_share": 0.375,
+   "mean_len": 9.14,
+   "vowel_final": 0.316
+  },
+  "lugbara": {
+   "sentences": 15524,
+   "words": 184426,
+   "distinct": 10183,
+   "ttr": 0.0552,
+   "hapax_share": 0.54,
+   "mean_len": 11.88,
+   "vowel_final": 0.989
+  },
+  "luganda": {
+   "sentences": 15524,
+   "words": 113771,
+   "distinct": 22716,
+   "ttr": 0.1997,
+   "hapax_share": 0.641,
+   "mean_len": 7.33,
+   "vowel_final": 0.992
+  }
+ },
+ "top_words": [
+  [
+   "ma",
+   11898
+  ],
+  [
+   "'diyi",
+   6966
+  ],
+  [
+   "ni",
+   4830
+  ],
+  [
+   "'ba",
+   3670
+  ],
+  [
+   "e'yo",
+   3569
+  ],
+  [
+   "ba",
+   3279
+  ],
+  [
+   "eyi",
+   3190
+  ],
+  [
+   "azi",
+   2921
+  ],
+  [
+   "eri",
+   2916
+  ],
+  [
+   "yi",
+   2529
+  ],
+  [
+   "ra",
+   2421
+  ],
+  [
+   "ri",
+   2299
+  ],
+  [
+   "dria",
+   1918
+  ],
+  [
+   "ku",
+   1520
+  ],
+  [
+   "le",
+   1489
+  ],
+  [
+   "alia",
+   1478
+  ],
+  [
+   "alea",
+   1456
+  ],
+  [
+   "dri",
+   1438
+  ],
+  [
+   "nga",
+   1348
+  ],
+  [
+   "fe",
+   1341
+  ],
+  [
+   "si",
+   1317
+  ],
+  [
+   "niri",
+   1240
+  ],
+  [
+   "afa",
+   1209
+  ],
+  [
+   "'da",
+   1204
+  ],
+  [
+   "be",
+   1135
+  ],
+  [
+   "angu",
+   1060
+  ],
+  [
+   "eyini",
+   1044
+  ],
+  [
+   "amuti",
+   1019
+  ],
+  [
+   "kari",
+   1010
+  ],
+  [
+   "azini",
+   970
+  ],
+  [
+   "'bani",
+   939
+  ],
+  [
+   "azo",
+   929
+  ],
+  [
+   "i",
+   896
+  ],
+  [
+   "ru",
+   825
+  ],
+  [
+   "ama",
+   811
+  ],
+  [
+   "anzi",
+   793
+  ],
+  [
+   "vile",
+   771
+  ],
+  [
+   "ci",
+   734
+  ],
+  [
+   "geri",
+   710
+  ],
+  [
+   "robia",
+   686
+  ]
+ ],
+ "apostrophe_variants_raw": {
+  "U+0027 APOSTROPHE": 29545
+ },
+ "apostrophe_followed_by": [
+  [
+   "d",
+   14287
+  ],
+  [
+   "b",
+   8068
+  ],
+  [
+   "y",
+   5366
+  ],
+  [
+   "i",
+   838
+  ],
+  [
+   "w",
+   270
+  ],
+  [
+   "a",
+   214
+  ],
+  [
+   "z",
+   195
+  ],
+  [
+   "p",
+   51
+  ],
+  [
+   "t",
+   37
+  ],
+  [
+   "n",
+   35
+  ]
+ ],
+ "apostrophe_word_share": 0.16,
+ "non_ascii_letters": {
+  "ꞌ": 1567,
+  "ǝ": 1,
+  "đ": 1
+ },
+ "initial_clusters": [
+  [
+   "dr",
+   6045
+  ],
+  [
+   "ng",
+   2684
+  ],
+  [
+   "nd",
+   2062
+  ],
+  [
+   "ny",
+   1117
+  ],
+  [
+   "ndr",
+   646
+  ],
+  [
+   "mb",
+   621
+  ],
+  [
+   "nz",
+   620
+  ],
+  [
+   "ꞌb",
+   552
+  ],
+  [
+   "tr",
+   451
+  ],
+  [
+   "ꞌd",
+   442
+  ],
+  [
+   "mv",
+   221
+  ],
+  [
+   "gb",
+   179
+  ],
+  [
+   "pr",
+   148
+  ],
+  [
+   "ꞌy",
+   92
+  ],
+  [
+   "kp",
+   89
+  ]
+ ],
+ "overlap_top2000": {
+  "lugbara~english": 0.051,
+  "lugbara~luganda": 0.043
+ },
+ "tokenizers": {
+  "xlmr": {
+   "pieces_per_word": {
+    "english": 1.33,
+    "lugbara": 1.85,
+    "luganda": 2.87
+   },
+   "apostrophe_cut_off_share": 1.0
+  },
+  "mt5": {
+   "pieces_per_word": {
+    "english": 1.48,
+    "lugbara": 2.04,
+    "luganda": 2.85
+   },
+   "apostrophe_cut_off_share": 1.0
+  }
+ }
+}

@@ -46,6 +46,7 @@ language analysis of its training data.
 | `kaggle/01`–`04` | XLM-R, mT5 and fusion on SALT; results report |
 | `kaggle/05`–`07` | mT5, XLM-R and fusion on the local corpus, each cross-tested against its SALT-trained twin |
 | `kaggle/08` | After 05 and 06: the comparison on the sentences the two corpora do not share |
+| `results/` | What the SALT runs produced: scores, training logs, grid searches, charts, test translations and the published model cards |
 | `scripts/` | The first approach (extending the MarianMT Rutooro translator; `train.py`, `prepare_data.py`, `evaluate.py`, `common.py`), the Lugbara analysis, and helpers (`rebuild_data.py` rebuilds the SALT sample on a PC) |
 
 ## Running

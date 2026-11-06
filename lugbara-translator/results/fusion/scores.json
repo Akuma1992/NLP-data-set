@@ -1,0 +1,31 @@
+{
+  "english-lugbara": {
+    "n": 2328,
+    "bleu": 8.14,
+    "ter": 93.79,
+    "chrf": 35.22,
+    "word_f1": 0.3536,
+    "apostrophe_integrity": 0.5545
+  },
+  "english-luganda": {
+    "n": 2328,
+    "bleu": 6.72,
+    "ter": 88.93,
+    "chrf": 36.52,
+    "word_f1": 0.277
+  },
+  "lugbara-english": {
+    "n": 2328,
+    "bleu": 5.72,
+    "ter": 92.17,
+    "chrf": 26.53,
+    "word_f1": 0.2566
+  },
+  "luganda-english": {
+    "n": 2328,
+    "bleu": 6.57,
+    "ter": 89.84,
+    "chrf": 27.27,
+    "word_f1": 0.2736
+  }
+}

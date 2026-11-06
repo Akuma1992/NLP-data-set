@@ -1,0 +1,16 @@
+{
+  "lugbara-english": {
+    "n": 2328,
+    "bleu": 12.71,
+    "ter": 73.47,
+    "chrf": 34.73,
+    "word_f1": 0.3942
+  },
+  "luganda-english": {
+    "n": 2328,
+    "bleu": 16.65,
+    "ter": 67.81,
+    "chrf": 38.88,
+    "word_f1": 0.4455
+  }
+}

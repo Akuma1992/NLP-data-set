@@ -1,0 +1,53 @@
+{
+  "results": [
+    {
+      "lr": 0.0003,
+      "batch_size": 8,
+      "val_bleu": 3.79,
+      "val_loss": 2.3148,
+      "minutes": 23.3
+    },
+    {
+      "lr": 0.0003,
+      "batch_size": 16,
+      "val_bleu": 1.4,
+      "val_loss": 2.6479,
+      "minutes": 14.8
+    },
+    {
+      "lr": 0.0005,
+      "batch_size": 8,
+      "val_bleu": 3.05,
+      "val_loss": 2.3599,
+      "minutes": 22.4
+    },
+    {
+      "lr": 0.0005,
+      "batch_size": 16,
+      "val_bleu": 1.68,
+      "val_loss": 2.5315,
+      "minutes": 14.9
+    },
+    {
+      "lr": 0.001,
+      "batch_size": 8,
+      "val_bleu": 0.27,
+      "val_loss": 3.0217,
+      "minutes": 22.3
+    },
+    {
+      "lr": 0.001,
+      "batch_size": 16,
+      "val_bleu": 4.11,
+      "val_loss": 2.2334,
+      "minutes": 14.8
+    }
+  ],
+  "best": {
+    "lr": 0.001,
+    "batch_size": 16,
+    "val_bleu": 4.11,
+    "val_loss": 2.2334,
+    "minutes": 14.8
+  }
+}

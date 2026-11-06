@@ -1,0 +1,53 @@
+{
+  "results": [
+    {
+      "lr": 3e-05,
+      "batch_size": 16,
+      "val_bleu": 0.0,
+      "val_loss": 7.0395,
+      "minutes": 17.1
+    },
+    {
+      "lr": 3e-05,
+      "batch_size": 32,
+      "val_bleu": 0.07,
+      "val_loss": 6.4275,
+      "minutes": 11.9
+    },
+    {
+      "lr": 5e-05,
+      "batch_size": 16,
+      "val_bleu": 0.04,
+      "val_loss": 7.458,
+      "minutes": 17.1
+    },
+    {
+      "lr": 5e-05,
+      "batch_size": 32,
+      "val_bleu": 0.1,
+      "val_loss": 6.4634,
+      "minutes": 12.4
+    },
+    {
+      "lr": 0.0001,
+      "batch_size": 16,
+      "val_bleu": 0.01,
+      "val_loss": 6.4221,
+      "minutes": 16.5
+    },
+    {
+      "lr": 0.0001,
+      "batch_size": 32,
+      "val_bleu": 0.06,
+      "val_loss": 7.0164,
+      "minutes": 12.5
+    }
+  ],
+  "best": {
+    "lr": 5e-05,
+    "batch_size": 32,
+    "val_bleu": 0.1,
+    "val_loss": 6.4634,
+    "minutes": 12.4
+  }
+}
