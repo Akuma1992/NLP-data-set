@@ -6,13 +6,18 @@ Language", MSc Computer Science, Muni University, Oct 2025.
   * Lugbara -> English : mT5
 The thesis corpus (15,524 pairs) is not public, so the same number of sentences is drawn at
 random from SALT and split 70/15/15 like the thesis. Luganda uses the same sentences.
+The *_local models train the same two models, with the settings their SALT runs chose, on the
+local English-Lugbara corpus published with the thesis (github.com/Akuma1992/NLP-data-set),
+so the two corpora can be compared.
 
 Subcommands (run in order; see the Kaggle notebooks):
-  prepare  --model M            sample + split SALT, write data/*.jsonl
+  prepare  [--dataset local]     sample + split SALT -> data/*.jsonl (local corpus -> data_local/)
   grid     --model M            learning-rate x batch-size grid search (thesis 3.4.3)
   train    --model M            fine-tune with the best grid setting, early stopping on val loss
   evaluate --model M            BLEU / TER / chrF / word-F1 / apostrophe integrity on the test split
-  analyze                       Lugbara language analysis -> LUGBARA_ANALYSIS.md
+           [--on salt|local] [--counterpart | --from-repo R --revision V] [--name N]   cross-tests
+  compare  --model M            *_local models: trained on SALT vs local corpus x tested on both (2 x 2)
+  analyze  [--dataset local]    Lugbara language analysis -> LUGBARA_ANALYSIS.md
   card     --model M            README.md model card
   push     --model M --repo R   upload the trained model, card and analysis
   copy     --repo R             copy mmuniversity/rutooro-multilingual-translator into R
@@ -36,8 +41,15 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 WORK = Path(os.environ.get("LUGBARA_WORK", "/kaggle/working" if Path("/kaggle").exists() else "work"))
-DATA = WORK / "data"
+DATA = WORK / "data"                 # SALT split
+DATA_LOCAL = WORK / "data_local"     # local corpus split (Akuma 2025)
 OUT = WORK / "out"
+LOCAL_URL = "https://raw.githubusercontent.com/Akuma1992/NLP-data-set/main/datasetnlp%20.csv"
+LOCAL_SOURCE = "https://github.com/Akuma1992/NLP-data-set"
+
+
+def data_dir(dataset):
+    return DATA_LOCAL if dataset == "local" else DATA
 SALT = "Sunbird/salt"
 SOURCE_REPO = "mmuniversity/rutooro-multilingual-translator"
 SEED = 13
@@ -79,7 +91,32 @@ MODELS = {
         "license": "apache-2.0",
         "grid_epochs": 1, "patience": 3, "label_smoothing": 0.0, "lr_mult": {}, "gen": {}, "notes": [],
     },
+    # the same two models trained on the local English-Lugbara corpus of Akuma (2025), with the
+    # settings their SALT runs chose (no new grid), so that only the data differs
+    "mt5_local": {
+        "base": "google/mt5-base", "dataset": "local", "kind": "t5",
+        "title": "mT5 Lugbara→English translator (local corpus)",
+        "directions": [("lugbara", "english")],
+        "lr": 1e-3, "bs": 16, "optim": "adafactor", "fp16": False, "license": "apache-2.0",
+        "grid_epochs": 1, "patience": 3, "label_smoothing": 0.0, "lr_mult": {}, "gen": {},
+        "counterpart": {"key": "mt5", "repo": "ckuma/lugbara-english-translator", "revision": None},
+        "notes": ["Same model and settings as the SALT-trained mT5 (learning rate 1e-3, batch 16, the "
+                  "winner of its SALT grid search); only the training data differs."],
+    },
+    "xlmr_local": {
+        "base": "FacebookAI/xlm-roberta-base", "dataset": "local", "kind": "encdec",
+        "title": "XLM-R English→Lugbara translator (local corpus)",
+        "directions": [("english", "lugbara")],
+        "lr": 3e-5, "bs": 16, "optim": "adamw_torch", "fp16": True, "license": "mit",
+        "grid_epochs": 1, "patience": 3, "label_smoothing": 0.0, "lr_mult": {}, "gen": {},
+        "counterpart": {"key": "xlmr", "repo": "ckuma/lugbara-multilingual-translator", "revision": "b2eec05b"},
+        "notes": ["Same model and settings as the first SALT-trained XLM-R (version 1: learning rate 3e-5, "
+                  "batch 16, the winner of its SALT grid search); only the training data differs."],
+    },
 }
+for _k, _c in MODELS.items():
+    _c.setdefault("dataset", "salt")
+    _c.setdefault("kind", "encdec" if _k == "xlmr" else "t5")
 MAX_LEN = 128
 
 # thesis Table 4.12, on the thesis corpus (shown for reference only)
@@ -89,6 +126,7 @@ THESIS = {
 }
 
 # ---------------------------------------------------------------- text
+APOS_CHARS = "'’‘ʼʻ`´′ꞌꞋ"
 APOS = re.compile("[’‘ʼʻ`´′ꞌꞋ]")   # incl. saltillo ꞌ, used in SALT Lugbara
 WS = re.compile(r"\s+")
 WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]*)*|'[^\W\d_]+", re.UNICODE)
@@ -144,7 +182,74 @@ def load_salt_rows(fake=0):
     return rows
 
 
+def load_local_rows():
+    """The local corpus CSV (columns English, Lugbara). Mostly UTF-8 with a few Windows-1252 lines.
+    Downloaded from GitHub, or read from the file named by LUGBARA_LOCAL_CSV."""
+    import csv
+    import io
+    import urllib.request
+    path = os.environ.get("LUGBARA_LOCAL_CSV")
+    if path:
+        raw = Path(path).read_bytes()
+    else:
+        for attempt in range(4):
+            try:
+                raw = urllib.request.urlopen(LOCAL_URL, timeout=120).read()
+                break
+            except OSError as e:
+                if attempt == 3:
+                    raise
+                print("download failed, retrying:", e, flush=True)
+                time.sleep(10 * (attempt + 1))
+    lines = []
+    for line in raw.split(b"\n"):
+        try:
+            lines.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            lines.append(line.decode("cp1252", errors="replace"))
+    reader = csv.reader(io.StringIO("\n".join(lines)))
+    header = [h.strip().lower() for h in next(reader)]
+    ie, il = header.index("english"), header.index("lugbara")
+    return [{"id": i, "split": "local", "english": r[ie] if len(r) > ie else "",
+             "lugbara": r[il] if len(r) > il else "", "raw_lgg": r[il] if len(r) > il else None}
+            for i, r in enumerate(reader)]
+
+
+def prepare_local(args):
+    """Same cleaning rules as SALT; every clean pair is used, split 70/15/15 at random (seed 13)."""
+    rows = load_local_rows()
+    langs = ("english", "lugbara")
+    stats = {"source": LOCAL_SOURCE, "rows": len(rows),
+             "nonempty": {k: sum(1 for r in rows if normalize(r[k])) for k in langs}}
+    clean, seen, dropped = [], set(), Counter()
+    for r in rows:
+        t = {k: normalize(r[k]) for k in langs}
+        if not all(t.values()):
+            dropped["empty"] += 1
+            continue
+        if (t["english"], t["lugbara"]) in seen:
+            dropped["duplicate"] += 1
+            continue
+        lens = [max(1, len(t[k].split())) for k in langs]
+        if max(lens) / min(lens) > 3.5 or max(lens) > 100:
+            dropped["malformed"] += 1
+            continue
+        seen.add((t["english"], t["lugbara"]))
+        clean.append({"id": r["id"], **t, "raw_lgg": r["raw_lgg"]})
+    random.Random(SEED).shuffle(clean)
+    n_train, n_val = round(len(clean) * 0.70), round(len(clean) * 0.15)
+    splits = {"train": clean[:n_train], "val": clean[n_train:n_train + n_val], "test": clean[n_train + n_val:]}
+    for name, part in splits.items():
+        jl_write(DATA_LOCAL / f"{name}.jsonl", part)
+    stats.update({"clean_rows": len(clean), "dropped": dict(dropped), "seed": SEED,
+                  "split_sizes": {k: len(v) for k, v in splits.items()}, "lowercase": LOWERCASE})
+    (DATA_LOCAL / "stats.json").write_text(json.dumps(stats, indent=2))
+    print(json.dumps(stats, indent=2))
+
+
 def prepare(args):
+    if getattr(args, "dataset", "salt") == "local":
+        return prepare_local(args)
     rows = load_salt_rows(args.fake)
     stats = {"salt_rows": len(rows),
              "salt_nonempty": {k: sum(1 for r in rows if normalize(r[c])) for k, c in COLS.items()}}
@@ -179,27 +284,29 @@ def prepare(args):
     print(json.dumps(stats, indent=2))
 
 
-def pairs(split, directions, limit=None):
-    rows = jl_read(DATA / f"{split}.jsonl")
+def pairs(split, directions, limit=None, dataset="salt"):
+    rows = jl_read(data_dir(dataset) / f"{split}.jsonl")
     out = []
     for src, tgt in directions:
+        if rows and (src not in rows[0] or tgt not in rows[0]):
+            continue          # e.g. Luganda directions on the English-Lugbara local corpus
         sel = rows[:limit] if limit else rows
         out += [{"dir": f"{src}-{tgt}", "src": prefix(tgt) + r[src], "tgt": r[tgt], "id": r["id"]} for r in sel]
     return out
 
 
 # ---------------------------------------------------------------- model
-def build(model_key, base=None, from_dir=None):
+def build(model_key, base=None, from_dir=None, revision=None):
     import torch  # noqa: F401
     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, EncoderDecoderModel
     cfg = MODELS[model_key]
     base = base or cfg["base"]
     if from_dir:
-        tok = AutoTokenizer.from_pretrained(from_dir)
-        model = AutoModelForSeq2SeqLM.from_pretrained(from_dir)
+        tok = AutoTokenizer.from_pretrained(str(from_dir), revision=revision)
+        model = AutoModelForSeq2SeqLM.from_pretrained(str(from_dir), revision=revision)
         return tok, model
     tok = AutoTokenizer.from_pretrained(base)
-    if model_key == "xlmr":
+    if cfg["kind"] == "encdec":
         # warm-start an encoder-decoder from XLM-R (Rothe et al., 2020); encoder and decoder
         # share weights, which halves the parameters and fits a 16 GB GPU
         model = EncoderDecoderModel.from_encoder_decoder_pretrained(base, base, tie_encoder_decoder=True)
@@ -257,10 +364,12 @@ def group_lr_trainer_class(base_cls):
 
 
 def encode_fn(tok, model_key):
+    kind = MODELS[model_key]["kind"]
+
     def enc(b):
         x = tok(b["src"], max_length=MAX_LEN, truncation=True)
         y = tok(text_target=b["tgt"], max_length=MAX_LEN, truncation=True)["input_ids"]
-        if model_key == "xlmr":
+        if kind == "encdec":
             y = [ids[1:] for ids in y]          # drop <s>: the decoder starts from it already
         x["labels"] = y
         return x
@@ -359,8 +468,11 @@ def device_is_cpu():
 def grid(args):
     import torch
     cfg = MODELS[args.model]
-    train_rows = pairs("train", cfg["directions"])
-    val_rows = pairs("val", cfg["directions"])
+    if "grid_lr" not in cfg:
+        print(args.model, "has no grid: it reuses the settings its SALT counterpart chose")
+        return
+    train_rows = pairs("train", cfg["directions"], dataset=cfg["dataset"])
+    val_rows = pairs("val", cfg["directions"], dataset=cfg["dataset"])
     lugbara_dir = [d for d in cfg["directions"] if "lugbara" in d][0]
     probe = [r for r in val_rows if r["dir"] == f"{lugbara_dir[0]}-{lugbara_dir[1]}"][:args.probe]
     results = []
@@ -395,7 +507,7 @@ def train(args):
         best = json.loads(gpath.read_text())["best"]
         lr, bs = best["lr"], best["batch_size"]
     tok, model = build(args.model, args.base)
-    tr = make_trainer(args.model, tok, model, pairs("train", cfg["directions"]), pairs("val", cfg["directions"]),
+    tr = make_trainer(args.model, tok, model, pairs("train", cfg["directions"], dataset=cfg["dataset"]), pairs("val", cfg["directions"], dataset=cfg["dataset"]),
                       lr, bs, OUT / args.model / "checkpoints", epochs=args.epochs, cpu=device_is_cpu(),
                       max_steps=args.max_steps)
     t0 = time.time()
@@ -413,21 +525,123 @@ def train(args):
 
 
 def evaluate(args):
+    """Score on a test split. Defaults: this run's model on its own dataset's test split.
+    --on salt|local       another test split (cross-test)
+    --counterpart         the published SALT-trained counterpart instead of this run's model
+    --from-repo/--revision any other published model
+    --name N              write to out/MODEL/cross/N/ instead of out/MODEL/"""
     import torch
     cfg = MODELS[args.model]
-    tok, model = build(args.model, from_dir=OUT / args.model / "model")
+    on = getattr(args, "on", None) or cfg["dataset"]
+    repo, rev = getattr(args, "from_repo", None), getattr(args, "revision", None)
+    if getattr(args, "counterpart", False):
+        repo, rev = cfg["counterpart"]["repo"], cfg["counterpart"]["revision"]
+    tok, model = build(args.model, from_dir=repo or OUT / args.model / "model", revision=rev)
     if torch.cuda.is_available():
         model = model.cuda()
+    name = getattr(args, "name", None)
+    dest = OUT / args.model / "cross" / name if name else OUT / args.model
+    dest.mkdir(parents=True, exist_ok=True)
     res = {}
     for src, tgt in cfg["directions"]:
-        rows = [r for r in pairs("test", [(src, tgt)], limit=args.limit)]
+        rows = pairs("test", [(src, tgt)], limit=args.limit, dataset=on)
+        if not rows:
+            continue
         hyps = translate(tok, model, [r["src"] for r in rows])
         d = f"{src}-{tgt}"
         res[d] = score(hyps, [r["tgt"] for r in rows], tgt)
-        print(d, res[d], flush=True)
-        jl_write(OUT / args.model / f"test_outputs.{d}.jsonl",
+        print(f"[{repo or 'this model'}{'@' + rev if rev else ''} on {on} test]", d, res[d], flush=True)
+        jl_write(dest / f"test_outputs.{d}.jsonl",
                  [{"id": r["id"], "src": r["src"], "ref": r["tgt"], "hyp": h} for r, h in zip(rows, hyps)])
-    (OUT / args.model / "scores.json").write_text(json.dumps(res, indent=2))
+    (dest / "scores.json").write_text(json.dumps(res, indent=2))
+    if name:
+        (dest / "about.json").write_text(json.dumps(
+            {"model": repo or f"this run ({args.model})", "revision": rev, "test_set": on}, indent=2))
+
+
+CROSS = {   # (trained on, tested on) -> where the scores are, for a local-corpus run
+    ("local", "local"): "scores.json",
+    ("local", "salt"): "cross/on_salt/scores.json",
+    ("salt", "local"): "cross/salt_model_on_local/scores.json",
+    ("salt", "salt"): "cross/salt_model_on_salt/scores.json",
+}
+
+
+def compare(args):
+    """Trained on SALT vs trained on the local corpus, each tested on both test splits (2 x 2).
+    The SALT model's SALT score is its published one (same split, same code)."""
+    cfg = MODELS[args.model]
+    return cross_table(OUT / args.model, cfg["counterpart"], cfg["directions"], cfg["title"].split(" ")[0])
+
+
+def hub_link(cp):
+    return f"[{cp['repo']}](https://huggingface.co/{cp['repo']}" + \
+           (f"/tree/{cp['revision']})" if cp.get("revision") else ")")
+
+
+def cross_table(d, cp, directions, model_name):
+    """The 2 x 2 table for a local-corpus run whose cross-test scores are under d (see CROSS)."""
+    ss = d / CROSS[("salt", "salt")]
+    if not ss.exists():
+        from huggingface_hub import hf_hub_download
+        ss.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hf_hub_download(cp["repo"], "scores.json", revision=cp["revision"]), ss)
+        (ss.parent / "about.json").write_text(json.dumps(
+            {"model": cp["repo"], "revision": cp["revision"], "test_set": "salt",
+             "note": "published test scores of the SALT-trained model"}, indent=2))
+    dirs = [f"{a}-{b}" for a, b in directions]
+    table = {}
+    for (train_on, test_on), rel in CROSS.items():
+        if (d / rel).exists():
+            for dname, v in json.loads((d / rel).read_text()).items():
+                if dname in dirs:
+                    table.setdefault(dname, {})[f"{train_on}>{test_on}"] = v
+    out = {"model": d.name, "counterpart": cp, "table": table,
+           "rows": "trained on", "columns": "tested on"}
+    (d / "comparison.json").write_text(json.dumps(out, indent=2))
+    for dname, cells in table.items():
+        print(dname)
+        for k, v in cells.items():
+            print(f"  trained on {k.split('>')[0]:5s}  tested on {k.split('>')[1]:5s}  BLEU {v['bleu']:6.2f}  chrF {v['chrf']:6.2f}")
+    try:
+        import lugbara_plots
+        print("figure", lugbara_plots.dataset_figure(out, d / "figures" / "salt_vs_local.png", model_name))
+    except Exception as e:  # plotting must never stop a run
+        print("comparison figure skipped:", type(e).__name__, e)
+    return out
+
+
+def cross_section_md(d, cp, what="model"):
+    """Model-card section for the 2 x 2 table in d/comparison.json ('' if there is none)."""
+    cpath = d / "comparison.json"
+    if not cpath.exists():
+        return ""
+    comp = json.loads(cpath.read_text())
+    cell = lambda cells, k: f"{cells[k]['bleu']} / {cells[k]['chrf']}" if k in cells else "–"
+    trows = []
+    for dname, cells in comp["table"].items():
+        trows.append([dname.replace("-", " → ").title(), f"SALT ({hub_link(cp)})",
+                      cell(cells, "salt>salt"), cell(cells, "salt>local")])
+        trows.append(["", f"Local corpus (this {what})", cell(cells, "local>salt"), cell(cells, "local>local")])
+    unseen = ""
+    apath = OUT / "lugbara_analysis.json"
+    vs = json.loads(apath.read_text(encoding="utf-8")).get("vs_salt") if apath.exists() else None
+    if vs:
+        u = vs["unseen_test_words"]["lugbara"]
+        unseen = (f"\nLugbara word tokens of each test split that never occur in the training split: "
+                  f"SALT test {100 * u['salt>salt']:.1f}% (SALT train) vs {100 * u['local>salt']:.1f}% (local train); "
+                  f"local test {100 * u['local>local']:.1f}% (local train) vs {100 * u['salt>local']:.1f}% (SALT train). "
+                  "See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md).\n")
+    fig = "![SALT vs local corpus](figures/salt_vs_local.png)\n" if (d / "figures" / "salt_vs_local.png").exists() else ""
+    return f"""
+## Trained on SALT vs trained on the local corpus
+
+The same {what} with the same settings, trained once on each corpus and tested on both test splits
+(BLEU / chrF; the SALT test split is the {N_TOTAL - N_TRAIN - N_VAL:,}-sentence split of the thesis-sized SALT sample).
+
+{md_table(trows, ["Direction", "Trained on", "SALT test", "Local test"])}
+
+{fig}{unseen}"""
 
 
 # ---------------------------------------------------------------- analysis
@@ -444,16 +658,22 @@ def corpus_stats(rows, key):
 
 
 def analyze(args):
+    """Lugbara language analysis of a training corpus (--dataset salt|local) -> LUGBARA_ANALYSIS.md.
+    For the local corpus it also compares it with the SALT sample when that is prepared."""
     from transformers import AutoTokenizer
-    rows = jl_read(DATA / "train.jsonl") + jl_read(DATA / "val.jsonl") + jl_read(DATA / "test.jsonl")
-    stats = json.loads((DATA / "stats.json").read_text())
-    per = {k: corpus_stats(rows, k) for k in COLS}
+    dataset = getattr(args, "dataset", None) or "salt"
+    ddir = data_dir(dataset)
+    langs = list(COLS) if dataset == "salt" else ["english", "lugbara"]
+    rows = jl_read(ddir / "train.jsonl") + jl_read(ddir / "val.jsonl") + jl_read(ddir / "test.jsonl")
+    stats = json.loads((ddir / "stats.json").read_text())
+    per = {k: corpus_stats(rows, k) for k in langs}
     lg = per["lugbara"]
-    res = {"stats": stats, "corpus": {k: {kk: vv for kk, vv in v.items() if kk != "_c"} for k, v in per.items()},
+    res = {"dataset": dataset, "stats": stats,
+           "corpus": {k: {kk: vv for kk, vv in v.items() if kk != "_c"} for k, v in per.items()},
            "top_words": lg["_c"].most_common(40)}
     raw = "".join(r.get("raw_lgg") or "" for r in rows)
     res["apostrophe_variants_raw"] = {f"U+{ord(k):04X} {unicodedata.name(k, '?')}": v
-                                      for k, v in Counter(ch for ch in raw if ch in "'’‘ʼʻ`´′ꞌꞋ").items()}
+                                      for k, v in Counter(ch for ch in raw if ch in APOS_CHARS).items()}
     text = " ".join(r["lugbara"] for r in rows)
     res["apostrophe_followed_by"] = Counter(m.group(1) for m in re.finditer(r"'([a-z])", text)).most_common(10)
     res["apostrophe_word_share"] = round(sum(v for w, v in lg["_c"].items() if "'" in w) / max(1, lg["words"]), 3)
@@ -465,19 +685,19 @@ def analyze(args):
             onsets[m.group(1)] += v
     res["initial_clusters"] = onsets.most_common(15)
     top = lambda k: {w for w, _ in per[k]["_c"].most_common(2000)}
-    res["overlap_top2000"] = {"lugbara~english": round(len(top("lugbara") & top("english")) / 2000, 3),
-                              "lugbara~luganda": round(len(top("lugbara") & top("luganda")) / 2000, 3)}
+    res["overlap_top2000"] = {f"lugbara~{k}": round(len(top("lugbara") & top(k)) / 2000, 3)
+                              for k in langs if k != "lugbara"}
     # how each thesis model's tokenizer cuts Lugbara (thesis 3.2.2: keep the apostrophe inside the word)
     res["tokenizers"] = {}
     apos_words = [w for w, _ in lg["_c"].most_common() if "'" in w][:500]
-    for key in MODELS:
+    for key in ("xlmr", "mt5"):
         try:
             tok = AutoTokenizer.from_pretrained(MODELS[key]["base"])
         except Exception as e:  # offline smoke runs
             print("tokenizer", key, "skipped:", e)
             continue
         fit = {}
-        for lang in COLS:
+        for lang in langs:
             sample = [r[lang] for r in rows[:3000]]
             pieces = sum(len(tok.tokenize(s)) for s in sample)
             fit[lang] = round(pieces / max(1, sum(len(s.split()) for s in sample)), 2)
@@ -489,9 +709,11 @@ def analyze(args):
                                   "apostrophe_cut_off_share": round(split_apos / max(1, len(apos_words)), 3)}
     # words-per-sentence distribution (capped at 40) for the length chart
     res["length_hist"] = {}
-    for lang in COLS:
+    for lang in langs:
         cnt = Counter(min(40, len(words(r[lang]))) for r in rows)
         res["length_hist"][lang] = {str(n): cnt.get(n, 0) for n in range(1, 41)}
+    if dataset == "local" and (DATA / "train.jsonl").exists():
+        res["vs_salt"] = compare_corpora()
     OUT.mkdir(parents=True, exist_ok=True)
     try:
         import lugbara_plots
@@ -504,6 +726,44 @@ def analyze(args):
     print("wrote", OUT / "LUGBARA_ANALYSIS.md")
 
 
+def compare_corpora():
+    """The local corpus next to the SALT sample: size, length, vocabulary, shared sentences, and
+    how many test words each training set never contains (explains the cross-test scores)."""
+    sets = {name: {s: jl_read(data_dir(name) / f"{s}.jsonl") for s in ("train", "val", "test")}
+            for name in ("salt", "local")}
+    every = {name: [r for part in v.values() for r in part] for name, v in sets.items()}
+    vocab = lambda rs, k: Counter(w for r in rs for w in words(r[k]))
+
+    def unseen(train_rs, test_rs, k):
+        v = vocab(train_rs, k)
+        toks = [w for r in test_rs for w in words(r[k])]
+        return round(sum(1 for w in toks if w not in v) / max(1, len(toks)), 4)
+
+    eng = {name: {r["english"] for r in rs} for name, rs in every.items()}
+    eng_train = {name: {r["english"] for r in sets[name]["train"]} for name in sets}
+    lgv = {name: vocab(rs, "lugbara") for name, rs in every.items()}
+    out = {"sentences": {n: len(rs) for n, rs in every.items()},
+           "test_sentences": {n: len(sets[n]["test"]) for n in sets},
+           "mean_len": {n: {k: round(sum(len(words(r[k])) for r in rs) / max(1, len(rs)), 2)
+                            for k in ("english", "lugbara")} for n, rs in every.items()},
+           "distinct_lugbara_words": {"salt": len(lgv["salt"]), "local": len(lgv["local"]),
+                                      "shared": len(set(lgv["salt"]) & set(lgv["local"]))},
+           "apostrophe_word_share": {n: round(sum(v for w, v in c.items() if "'" in w) / max(1, sum(c.values())), 3)
+                                     for n, c in lgv.items()},
+           "same_english_sentence": {
+               "local_in_salt": sum(1 for r in every["local"] if r["english"] in eng["salt"]),
+               "local_test_in_salt_train": sum(1 for r in sets["local"]["test"] if r["english"] in eng_train["salt"]),
+               "salt_test_in_local_train": sum(1 for r in sets["salt"]["test"] if r["english"] in eng_train["local"]),
+               # within each corpus: test sentences that also occur in its own training split
+               "local_test_in_local_train": sum(1 for r in sets["local"]["test"] if r["english"] in eng_train["local"]),
+               "salt_test_in_salt_train": sum(1 for r in sets["salt"]["test"] if r["english"] in eng_train["salt"])},
+           "unseen_test_words": {k: {f"{a}>{b}": unseen(sets[a]["train"], sets[b]["test"], k)
+                                     for a in ("salt", "local") for b in ("salt", "local")}
+                                 for k in ("lugbara", "english")}}
+    print("SALT vs local:", json.dumps(out))
+    return out
+
+
 def md_table(rows, head):
     out = ["| " + " | ".join(head) + " |", "|" + "|".join("---" for _ in head) + "|"]
     return "\n".join(out + ["| " + " | ".join(str(c) for c in r) + " |" for r in rows])
@@ -511,61 +771,103 @@ def md_table(rows, head):
 
 def render_analysis(r):
     c, s = r["corpus"], r["stats"]
+    local = r.get("dataset") == "local"
+    langs = list(c)
+    others = [l for l in langs if l != "lugbara"]
     figs = set(r.get("figures") or [])
     fig = lambda name, alt: [f"![{alt}](figures/{name})", ""] if name in figs else []
-    L = ["# Lugbara language analysis", "",
-         "Measured on the 15,524 SALT sentences used to train these models (the thesis-sized sample "
-         "described in the model card). Produced by `lugbara_mt.py analyze`.", "",
+    n = sum(s["split_sizes"].values())
+    drop = " / ".join(f"{s['dropped'].get(k, 0):,}" for k in ("empty", "duplicate", "malformed"))
+    split = " / ".join(str(s["split_sizes"][k]) for k in ("train", "val", "test"))
+    if local:
+        intro = (f"Measured on the {n:,} English–Lugbara pairs of the local corpus ([Akuma, 2025]({LOCAL_SOURCE})) "
+                 "used to train these models, after cleaning. Produced by `lugbara_mt.py analyze --dataset local`.")
+        sample = [["Rows in the CSV", s["rows"]], ["Rows with Lugbara text", s["nonempty"]["lugbara"]],
+                  ["Pairs after cleaning (all used)", s["clean_rows"]],
+                  ["Removed (empty / duplicate / malformed)", drop],
+                  ["Train / validation / test (seed 13)", split]]
+    else:
+        intro = ("Measured on the 15,524 SALT sentences used to train these models (the thesis-sized sample "
+                 "described in the model card). Produced by `lugbara_mt.py analyze`.")
+        sample = [["SALT rows (all splits)", s["salt_rows"]], ["Rows with Lugbara text", s["salt_nonempty"]["lugbara"]],
+                  ["Rows with English, Lugbara and Luganda, after cleaning", s["clean_rows"]],
+                  ["Removed (empty / duplicate / malformed)", drop],
+                  ["Sampled (seed 13)", n], ["Train / validation / test", split]]
+    L = ["# Lugbara language analysis", "", intro, "",
          "## Background", "",
          "Lugbara (ISO 639-3 `lgg`, Glottolog `lugb1240`) is a Central Sudanic language of the West "
          "Nile region of Uganda and the neighbouring north-east of the DR Congo. It is unrelated to "
          "Luganda and the other Bantu languages of Uganda. Lugbara is tonal, but tone is not written "
          "in everyday spelling. The apostrophe writes a glottal stop and forms the implosive and "
          "pre-glottalised consonants `'b`, `'d`, `'y` and `'w` (Akuma, 2025, §2.3.3).", "",
-         "## The sample", "",
-         md_table([["SALT rows (all splits)", s["salt_rows"]],
-                   ["Rows with Lugbara text", s["salt_nonempty"]["lugbara"]],
-                   ["Rows with English, Lugbara and Luganda, after cleaning", s["clean_rows"]],
-                   ["Removed (empty / duplicate / malformed)",
-                    " / ".join(str(s["dropped"].get(k, 0)) for k in ("empty", "duplicate", "malformed"))],
-                   ["Sampled (seed 13)", sum(s["split_sizes"].values())],
-                   ["Train / validation / test", " / ".join(str(s["split_sizes"][k]) for k in ("train", "val", "test"))]],
-                  ["", "Sentences"]), "",
+         "## The corpus" if local else "## The sample", "",
+         md_table(sample, ["", "Sentences"]), "",
          "## Sentence length and vocabulary", "",
          md_table([[k.title(), v["sentences"], v["words"], v["distinct"], v["mean_len"], v["ttr"], v["hapax_share"], v["vowel_final"]]
                    for k, v in c.items()],
                   ["Language", "Sentences", "Words", "Distinct words", "Words per sentence", "Type/token",
                    "Share of words seen once", "Word tokens ending in a vowel"]), "",
          f"The same sentences take **{c['lugbara']['mean_len']} words** in Lugbara, "
-         f"{c['english']['mean_len']} in English and {c['luganda']['mean_len']} in Luganda.", "",
-         *fig("data_sentence_length.png", "Words per sentence in English, Lugbara and Luganda"),
+         + " and ".join(f"{c[l]['mean_len']} in {l.title()}" for l in others) + ".", "",
+         *fig("data_sentence_length.png", "Words per sentence"),
          "### Most frequent Lugbara words", "",
          *fig("data_top_lugbara_words.png", "Most frequent Lugbara words"),
-         ", ".join(f"`{w}` ({n})" for w, n in r["top_words"]), "",
+         ", ".join(f"`{w}` ({k})" for w, k in r["top_words"]), "",
          "## Spelling", "",
          *fig("data_apostrophe_letters.png", "Letters following the Lugbara apostrophe"),
          f"* Word tokens containing an apostrophe: **{100 * r['apostrophe_word_share']:.1f}%**",
          "* Apostrophe followed by: " + ", ".join(f"`'{k}` {v}" for k, v in r["apostrophe_followed_by"]),
-         "* Apostrophe characters in the raw SALT text (all folded to `'`): "
+         f"* Apostrophe characters in the raw {'corpus' if local else 'SALT'} text (all folded to `'`): "
          + (", ".join(f"{k}: {v}" for k, v in r["apostrophe_variants_raw"].items()) or "none"),
          "* Letters outside ASCII: " + (", ".join(f"`{k}` {v}" for k, v in r["non_ascii_letters"].items()) or "none"),
          "* Most common word-initial consonant clusters: " + ", ".join(f"`{k}` {v}" for k, v in r["initial_clusters"]), "",
-         "## Relationship to English and Luganda", "",
+         "## Relationship to " + " and ".join(l.title() for l in others), "",
          md_table([[k.replace("~", " vs ").title(), f"{100 * v:.1f}%"] for k, v in r["overlap_top2000"].items()],
                   ["Pair", "Shared top-2,000 words"]), "",
          "## How the thesis models' tokenizers cut Lugbara", ""]
     if r["tokenizers"]:
         L += fig("data_tokenizer_pieces.png", "Sub-word pieces per word for each tokenizer")
-        L += [md_table([["XLM-R" if k == "xlmr" else "mT5", *[v["pieces_per_word"].get(l, "") for l in COLS],
+        L += [md_table([["XLM-R" if k == "xlmr" else "mT5", *[v["pieces_per_word"].get(l, "") for l in langs],
                          f"{100 * v['apostrophe_cut_off_share']:.1f}%"] for k, v in r["tokenizers"].items()],
-                       ["Tokenizer", "Pieces/word English", "Pieces/word Lugbara", "Pieces/word Luganda",
+                       ["Tokenizer", *[f"Pieces/word {l.title()}" for l in langs],
                         "Apostrophe words where `'` becomes its own piece"]), "",
               "The thesis kept the apostrophe inside the word when tokenising (§3.2.2). The last column "
               "shows how often each pre-trained tokenizer instead cuts it off, which is one reason the "
               "model card also reports apostrophe integrity of the output.", ""]
+    v = r.get("vs_salt")
+    if v:
+        u = v["unseen_test_words"]
+        pct = lambda x: f"{100 * x:.1f}%"
+        same = v["same_english_sentence"]
+        L += ["## Compared with the SALT sample", "",
+              md_table([["Sentence pairs", f"{v['sentences']['salt']:,}", f"{v['sentences']['local']:,}"],
+                        ["Words per English sentence", v["mean_len"]["salt"]["english"], v["mean_len"]["local"]["english"]],
+                        ["Words per Lugbara sentence", v["mean_len"]["salt"]["lugbara"], v["mean_len"]["local"]["lugbara"]],
+                        ["Distinct Lugbara words", f"{v['distinct_lugbara_words']['salt']:,}",
+                         f"{v['distinct_lugbara_words']['local']:,}"],
+                        ["Lugbara word tokens with an apostrophe", pct(v["apostrophe_word_share"]["salt"]),
+                         pct(v["apostrophe_word_share"]["local"])]],
+                       ["", "SALT sample", "Local corpus"]), "",
+              f"* Distinct Lugbara words found in both: **{v['distinct_lugbara_words']['shared']:,}**.",
+              f"* Local sentences whose English also appears in the SALT sample: {same['local_in_salt']:,} "
+              f"(local test sentences in SALT train: {same['local_test_in_salt_train']:,}; "
+              f"SALT test sentences in local train: {same['salt_test_in_local_train']:,}).",
+              f"* Test sentences whose English also occurs in the same corpus's training split: local "
+              f"{same['local_test_in_local_train']:,} of {v['test_sentences']['local']:,}, "
+              f"SALT {same['salt_test_in_salt_train']:,} of {v['test_sentences']['salt']:,}.", "",
+              "### Test words a training set never contains", "",
+              *fig("data_unseen_words.png", "Share of test words never seen in training"),
+              md_table([[("SALT" if a == "salt" else "Local") + " train",
+                         *[f"{pct(u['lugbara'][f'{a}>{b}'])} / {pct(u['english'][f'{a}>{b}'])}" for b in ("salt", "local")]]
+                        for a in ("salt", "local")],
+                       ["Lugbara / English word tokens unseen in …", "SALT test", "Local test"]), "",
+              "A model cannot be expected to produce a Lugbara word it never saw in training, so the "
+              "off-diagonal cells bound how well a model trained on one corpus can do on the other.", ""]
     L += ["## Limits", "",
-          "* SALT sentences are short and mostly about agriculture, health and community life; the "
-          "thesis corpus also covered tourism and religion.",
+          ("* The corpus has no domain labels, so the split is random rather than stratified by domain."
+           if local else
+           "* SALT sentences are short and mostly about agriculture, health and community life; the "
+           "thesis corpus also covered tourism and religion."),
           "* Tone is not written, so words that differ only in tone look the same.",
           "* All text is lowercased, as in the thesis.", ""]
     return "\n".join(L)
@@ -574,14 +876,16 @@ def render_analysis(r):
 # ---------------------------------------------------------------- card / push / copy
 def card(args):
     cfg = MODELS[args.model]
+    local = cfg["dataset"] == "local"
     scores = json.loads((OUT / args.model / "scores.json").read_text())
     tlog = json.loads((OUT / args.model / "train_log.json").read_text())
     gpath = OUT / args.model / "grid.json"
     grid_res = json.loads(gpath.read_text())["results"] if gpath.exists() else []
-    stats = json.loads((DATA / "stats.json").read_text())
+    stats = json.loads((data_dir(cfg["dataset"]) / "stats.json").read_text())
     repo = args.repo
     langs = sorted({ISO[l] for d in cfg["directions"] for l in d})
     ex_src, ex_tgt = cfg["directions"][0]
+    test_name = "local corpus" if local else "SALT"
     rows = []
     for d, v in scores.items():
         ref = THESIS.get(d, {})
@@ -590,7 +894,7 @@ def card(args):
                      v.get("apostrophe_integrity", "–"),
                      f"{best_ref[1]} ({best_ref[0]})" if best_ref else "–"])
     first_test = jl_read(OUT / args.model / f"test_outputs.{ex_src}-{ex_tgt}.jsonl")[:8]
-    usage = "\n".join(f'print(translate("{r["src"].split(" ", 1)[1]}", "{r["src"].split(" ", 1)[0]}"))'
+    usage = "\n".join(f"print(translate({r['src'].split(' ', 1)[1]!r}, {r['src'].split(' ', 1)[0]!r}))"
                       for r in first_test[:2])
     notes = "".join(f"* {n}\n" for n in cfg.get("notes", []))
     figdir = OUT / args.model / "figures"
@@ -598,15 +902,58 @@ def card(args):
         ("test_scores.png", "Test scores"), ("quality_by_length.png", "Quality by sentence length"),
         ("training.png", "Training and validation loss"), ("grid_search.png", "Grid search"))
         if (figdir / name).exists())
+    model_kind = "XLM-R was the thesis's optimised English→Lugbara model" if cfg["kind"] == "encdec" else \
+                 "mT5 was the thesis's optimised Lugbara→English model"
+    drop = " / ".join(f"{stats['dropped'].get(k, 0):,}" for k in ("empty", "duplicate", "malformed"))
+    sz = stats["split_sizes"]
+    grid_str = ", ".join(f"{g['lr']:g}/{g['batch_size']} → {g['val_bleu']} BLEU" for g in grid_res) or "not run"
+    if local:
+        cp_link = hub_link(cfg["counterpart"])
+        about = (f"\nIt is trained on the **local English–Lugbara corpus** published with the thesis "
+                 f"([Akuma1992/NLP-data-set]({LOCAL_SOURCE})) instead of SALT, with the same settings as its "
+                 f"SALT-trained twin {cp_link}, so the two can be compared.\n")
+        data_md = (f"* **Data:** the local English–Lugbara corpus ([Akuma1992/NLP-data-set]({LOCAL_SOURCE}), "
+                   f"`datasetnlp .csv`, {stats['rows']:,} rows). Empty / duplicate / malformed pairs removed "
+                   f"({drop}), leaving {stats['clean_rows']:,} pairs, split 70/15/15 at random (seed {SEED}): "
+                   f"{sz['train']:,} train, {sz['val']:,} validation, {sz['test']:,} test. The corpus has no "
+                   "domain labels, so the split is random rather than stratified by domain.")
+        hyper_md = (f"* **Hyperparameters:** no new grid search: the learning rate and batch size that the SALT "
+                    f"grid search chose for {cp_link} (lr {tlog['lr']:g}, batch {tlog['batch_size']}), optimiser "
+                    f"{cfg['optim']}, early stopping on validation loss (patience {cfg.get('patience', 3)}); "
+                    f"{tlog['global_step']:,} steps, {tlog['minutes']} minutes on a Kaggle GPU.")
+        thesis_note = ("\\*The thesis scores come from the thesis's own split and cleaning of its corpus, so "
+                       "they are a reference point rather than an exact like-for-like comparison.")
+        limits_md = (f"* Trained on {sz['train']:,} sentence pairs from one corpus; text from other domains "
+                     "may be translated less well (see the SALT cross-test above).")
+        credits_md = (f"* Data: Charity Driciru Akuma, local English–Lugbara corpus ([GitHub]({LOCAL_SOURCE})). "
+                      "Its repository states no licence; ask the author before reusing the data.\n"
+                      "* Cross-test data: Sunbird AI, SALT (CC BY-SA 4.0).")
+    else:
+        about = ""
+        data_md = (f"* **Data:** the thesis corpus (15,524 English–Lugbara pairs) is not public, so the same number\n"
+                   f"  of sentences was drawn at random (seed {SEED}) from the cleaned [Sunbird SALT](https://huggingface.co/datasets/Sunbird/salt)\n"
+                   f"  `text-all` table and split 70/15/15 like the thesis: {sz['train']:,} train,\n"
+                   f"  {sz['val']:,} validation, {sz['test']:,} test. Luganda uses\n"
+                   "  the same sentences. SALT has no domain labels, so the split is random rather than stratified by domain.")
+        hyper_md = ("* **Hyperparameters (thesis §3.4.3):** grid search over learning rate × batch size\n"
+                    f"  ({grid_str}),\n"
+                    f"  then fine-tuning with lr {tlog['lr']:g}, batch {tlog['batch_size']}, optimiser {cfg['optim']},\n"
+                    f"  early stopping on validation loss (patience {cfg.get('patience', 3)}); {tlog['global_step']:,} steps,\n"
+                    f"  {tlog['minutes']} minutes on a Kaggle GPU.")
+        thesis_note = ("\\*The thesis scores were measured on the thesis's own corpus, not on SALT, so they are a\n"
+                       "reference point rather than a like-for-like comparison.")
+        limits_md = "* Trained on short SALT sentences (agriculture, health, community life); other domains are weaker."
+        credits_md = "* Data: Sunbird AI, SALT (CC BY-SA 4.0)."
+    cross_md = cross_section_md(OUT / args.model, cfg["counterpart"]) if local else ""
+    datasets_line = "" if local else "datasets: [Sunbird/salt]\n"
     md = f"""---
 language: [{", ".join(langs)}]
 license: {cfg['license']}
 library_name: transformers
 pipeline_tag: translation
 base_model: {cfg['base']}
-datasets: [Sunbird/salt]
-metrics: [bleu, ter, chrf]
-tags: [translation, lugbara, luganda, low-resource, uganda, muni-university]
+{datasets_line}metrics: [bleu, ter, chrf]
+tags: [translation, lugbara, {"" if local else "luganda, "}low-resource, uganda, muni-university]
 ---
 
 # {cfg['title']}
@@ -614,8 +961,8 @@ tags: [translation, lugbara, luganda, low-resource, uganda, muni-university]
 Fine-tuned `{cfg['base']}` for {", ".join(f"{a.title()} → {b.title()}" for a, b in cfg['directions'])}.
 It follows the model choice and training method of **C. D. Akuma, *An Optimized Machine
 Translation Model for Low-Resource Lugbara Language*, MSc Computer Science, Muni University
-(October 2025)**: {"XLM-R was the thesis's optimised English→Lugbara model" if args.model == "xlmr" else "mT5 was the thesis's optimised Lugbara→English model"}.
-
+(October 2025)**: {model_kind}.
+{about}
 ## How to use
 
 Put the target-language tag in front of the sentence and use lowercase text, as in training.
@@ -636,49 +983,40 @@ def translate(text, tag):
 
 Tags: {", ".join(f"`{prefix(t).strip()}` for {s.title()} → {t.title()}" for s, t in cfg["directions"])}.
 
-## Results (test split, {sum(v["n"] for v in scores.values())} sentence pairs)
+## Results ({test_name} test split, {sum(v["n"] for v in scores.values())} sentence pairs)
 
 {md_table(rows, ["Direction", "Sentences", "BLEU ↑", "TER ↓", "Word F1 ↑", "chrF ↑", "Apostrophe integrity ↑", "Thesis best BLEU*"])}
 
 BLEU and TER are sacreBLEU corpus scores; word F1 is unigram precision/recall F1; apostrophe
 integrity is the share of apostrophe words in the reference (`'ba`, `a'dule` …) reproduced intact.
-\\*The thesis scores were measured on the thesis's own corpus, not on SALT, so they are a
-reference point rather than a like-for-like comparison.
+{thesis_note}
 
-{figs_md}
+{figs_md}{cross_md}
 ### Sample test translations ({ex_src.title()} → {ex_tgt.title()})
 
 {md_table([[r["src"].split(" ", 1)[1], r["ref"], r["hyp"]] for r in first_test], ["Source", "Reference", "Model"])}
 
 ## Training
 
-* **Data:** the thesis corpus (15,524 English–Lugbara pairs) is not public, so the same number
-  of sentences was drawn at random (seed {SEED}) from the cleaned [Sunbird SALT](https://huggingface.co/datasets/Sunbird/salt)
-  `text-all` table and split 70/15/15 like the thesis: {stats['split_sizes']['train']:,} train,
-  {stats['split_sizes']['val']:,} validation, {stats['split_sizes']['test']:,} test. Luganda uses
-  the same sentences. SALT has no domain labels, so the split is random rather than stratified by domain.
+{data_md}
 * **Preprocessing (thesis §3.2.2):** lowercased, punctuation normalised, all apostrophe variants
   folded to `'`, empty / duplicate / malformed pairs removed.
-* **Model:** {"encoder-decoder warm-started from XLM-R base (Rothe et al., 2020), encoder and decoder weights shared" if args.model == "xlmr" else "mT5 base, sequence-to-sequence"}.
-* **Hyperparameters (thesis §3.4.3):** grid search over learning rate × batch size
-  ({", ".join(f"{g['lr']:g}/{g['batch_size']} → {g['val_bleu']} BLEU" for g in grid_res) or "not run"}),
-  then fine-tuning with lr {tlog['lr']:g}, batch {tlog['batch_size']}, optimiser {cfg['optim']},
-  early stopping on validation loss (patience {cfg.get('patience', 3)}); {tlog['global_step']:,} steps,
-  {tlog['minutes']} minutes on a Kaggle GPU.
+* **Model:** {"encoder-decoder warm-started from XLM-R base (Rothe et al., 2020), encoder and decoder weights shared" if cfg["kind"] == "encdec" else "mT5 base, sequence-to-sequence"}.
+{hyper_md}
 
 {notes}
 See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md) for the Lugbara language analysis of the training data.
 
 ## Limits
 
-* Trained on short SALT sentences (agriculture, health, community life); other domains are weaker.
+{limits_md}
 * Lowercase only. Tone is not written in Lugbara, so tone-only differences are lost.
 * Automatic scores use one reference per sentence; Lugbara speakers should review output before use.
 
 ## Credits
 
 * Thesis and method: Charity Driciru Akuma, Muni University (2025).
-* Data: Sunbird AI, SALT (CC BY-SA 4.0).
+{credits_md}
 * Base model: `{cfg['base']}`.
 * Earlier work: [{SOURCE_REPO}](https://huggingface.co/{SOURCE_REPO}) (Mountains of the Moon University).
 """
@@ -687,15 +1025,24 @@ See [LUGBARA_ANALYSIS.md](LUGBARA_ANALYSIS.md) for the Lugbara language analysis
 
 
 def plots(args):
-    """Grid, training, test-score and length figures for one model (shown inline by the notebook)."""
+    """Grid, training, test-score, length and (local runs) SALT-vs-local figures for one model."""
     import lugbara_plots
-    paths = lugbara_plots.model_figures(OUT / args.model, MODELS[args.model]["title"].split(" ")[0], THESIS)
+    cfg = MODELS[args.model]
+    name = cfg["title"].split(" ")[0]
+    note = ("test sentence pairs from the local corpus. Thesis scores come from the thesis's own split "
+            "and cleaning of its corpus." if cfg["dataset"] == "local" else None)
+    paths = lugbara_plots.model_figures(OUT / args.model, name, THESIS, test_note=note)
+    comp = OUT / args.model / "comparison.json"
+    if comp.exists():
+        paths.append(lugbara_plots.dataset_figure(json.loads(comp.read_text()),
+                                                  OUT / args.model / "figures" / "salt_vs_local.png", name))
     for p in paths:
         print("figure", p)
 
 
 def copy_figures_and_outputs(model_out, folder):
-    """Data figures + this model's figures -> figures/, test outputs -> test_outputs/."""
+    """Data figures + this model's figures -> figures/, test outputs -> test_outputs/,
+    cross-tests (local runs) -> cross_tests/NAME/."""
     (folder / "figures").mkdir(parents=True, exist_ok=True)
     for src in (OUT / "figures", model_out / "figures"):
         for p in src.glob("*.png") if src.exists() else []:
@@ -703,23 +1050,32 @@ def copy_figures_and_outputs(model_out, folder):
     (folder / "test_outputs").mkdir(exist_ok=True)
     for p in model_out.glob("test_outputs.*.jsonl"):
         shutil.copy(p, folder / "test_outputs" / p.name)
+    cross = model_out / "cross"
+    for sub in sorted(cross.iterdir()) if cross.exists() else []:
+        if sub.is_dir():
+            dest = folder / "cross_tests" / sub.name
+            dest.mkdir(parents=True, exist_ok=True)
+            for p in sub.glob("*.json*"):
+                shutil.copy(p, dest / p.name)
 
 
 def push(args):
     from huggingface_hub import HfApi
     api = HfApi()
+    cfg = MODELS[args.model]
     folder = OUT / args.model / "model"
     for f in ("LUGBARA_ANALYSIS.md", "lugbara_analysis.json"):
         if (OUT / f).exists():
             shutil.copy(OUT / f, folder / f)
-    for f in ("scores.json", "train_log.json", "grid.json"):
+    for f in ("scores.json", "train_log.json", "grid.json", "comparison.json"):
         if (OUT / args.model / f).exists():
             shutil.copy(OUT / args.model / f, folder / f)
     copy_figures_and_outputs(OUT / args.model, folder)
     api.create_repo(args.repo, exist_ok=True, private=False)
+    data = "the local English-Lugbara corpus" if cfg["dataset"] == "local" else "SALT"
     # replace whatever was there before (e.g. the Rutooro copy), keep .gitattributes
     api.upload_folder(folder_path=str(folder), repo_id=args.repo,
-                      commit_message=f"{MODELS[args.model]['title']} trained on SALT (thesis method)",
+                      commit_message=f"{cfg['title']} trained on {data} (thesis method)",
                       delete_patterns=["*.safetensors", "*.bin", "*.spm", "*.model", "*.json", "*.md", "*.txt"])
     print("pushed", f"https://huggingface.co/{args.repo}")
 
@@ -745,21 +1101,44 @@ def copy(args):
 
 
 # ---------------------------------------------------------------- smoke test
+def trim_local_for_smoke(n=40):
+    """Smoke runs only: keep n validation/test rows of the local split so CPU evaluation is quick."""
+    for split in ("val", "test"):
+        p = DATA_LOCAL / f"{split}.jsonl"
+        jl_write(p, jl_read(p)[:n])
+
+
 def smoke(args):
-    """Tiny end-to-end run on CPU with synthetic data: prepare, grid(1 point), train, evaluate, card.
+    """Tiny end-to-end run on CPU: prepare, grid (1 point), train, evaluate, analyze, plots, card.
+    SALT rows are synthetic; a *_local model also uses the real local corpus (downloaded), runs both
+    cross-tests (its own model stands in for the SALT counterpart) and the 2 x 2 comparison.
     --base-root holds local copies of the base models (xlm-roberta-base/, mt5-small/)."""
     if args.base_root:
-        MODELS["xlmr"]["base"] = str(args.base_root / "xlm-roberta-base")
-        MODELS["mt5"]["base"] = str(args.base_root / "mt5-small")
+        for c in MODELS.values():
+            c["base"] = str(args.base_root / ("xlm-roberta-base" if c["kind"] == "encdec" else "mt5-small"))
     cfg = MODELS[args.model]
-    cfg["grid_lr"], cfg["grid_bs"], cfg["optim"] = cfg["grid_lr"][:1], [2], "adafactor"
+    local = cfg["dataset"] == "local"
+    cfg["optim"] = "adafactor"
+    if local:
+        cfg["bs"] = 2
+    else:
+        cfg["grid_lr"], cfg["grid_bs"] = cfg["grid_lr"][:1], [2]
     ns = argparse.Namespace(fake=40, model=args.model, base=None, probe=4, grid_epochs=1, max_steps=3,
-                            epochs=1, no_grid=False, limit=4, repo="local/smoke")
+                            epochs=1, no_grid=local, limit=4, repo="local/smoke", dataset="salt",
+                            on=None, counterpart=False, from_repo=None, revision=None, name=None)
+    with_ = lambda **kw: argparse.Namespace(**{**vars(ns), **kw})
     prepare(ns)
+    if local:
+        prepare(with_(dataset="local"))
+        trim_local_for_smoke()
     grid(ns)
     train(ns)
     evaluate(ns)
-    analyze(ns)
+    if local:
+        evaluate(with_(on="salt", name="on_salt"))
+        evaluate(with_(on="local", from_repo=str(OUT / args.model / "model"), name="salt_model_on_local"))
+        compare(ns)
+    analyze(with_(dataset=cfg["dataset"]))
     plots(ns)
     card(ns)
     # reload check
@@ -769,10 +1148,13 @@ def smoke(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prepare", "grid", "train", "evaluate", "analyze", "plots", "card", "push", "copy", "smoke"])
+    ap.add_argument("cmd", choices=["prepare", "grid", "train", "evaluate", "compare", "analyze", "plots", "card",
+                                    "push", "copy", "smoke"])
     ap.add_argument("--model", choices=list(MODELS), default="xlmr")
+    ap.add_argument("--dataset", choices=["salt", "local"], default=None,
+                    help="prepare/analyze: SALT sample (default) or the local corpus")
     ap.add_argument("--base", help="local path or hub id overriding the base model")
-    ap.add_argument("--base-root", type=Path, help="smoke: folder holding xlmr/ and mt5/ tokenizers")
+    ap.add_argument("--base-root", type=Path, help="smoke: folder holding xlm-roberta-base/ and mt5-small/")
     ap.add_argument("--repo")
     ap.add_argument("--fake", type=int, default=0)
     ap.add_argument("--epochs", type=float, default=30)
@@ -781,10 +1163,15 @@ def main():
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-grid", action="store_true")
+    ap.add_argument("--on", choices=["salt", "local"], help="evaluate: test split (default: the model's dataset)")
+    ap.add_argument("--counterpart", action="store_true", help="evaluate: the published SALT-trained twin")
+    ap.add_argument("--from-repo", help="evaluate: any published model (hub id or folder)")
+    ap.add_argument("--revision", help="evaluate: revision of --from-repo")
+    ap.add_argument("--name", help="evaluate: write to out/MODEL/cross/NAME/")
     args = ap.parse_args()
     random.seed(SEED)
-    {"prepare": prepare, "grid": grid, "train": train, "evaluate": evaluate, "analyze": analyze, "plots": plots,
-     "card": card, "push": push, "copy": copy, "smoke": smoke}[args.cmd](args)
+    {"prepare": prepare, "grid": grid, "train": train, "evaluate": evaluate, "compare": compare,
+     "analyze": analyze, "plots": plots, "card": card, "push": push, "copy": copy, "smoke": smoke}[args.cmd](args)
 
 
 if __name__ == "__main__":

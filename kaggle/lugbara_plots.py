@@ -19,6 +19,8 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]          # fixed order, ne
 BLUES = LinearSegmentedColormap.from_list(
     "blues", ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"])
 LANG_COLOR = {"english": SERIES[0], "lugbara": SERIES[1], "luganda": SERIES[2]}
+DS_COLOR = {"salt": SERIES[0], "local": SERIES[1]}              # training corpus, in the 2 x 2 charts
+DS_NAME = {"salt": "SALT", "local": "local corpus"}
 THESIS_INK = INK2
 
 
@@ -68,9 +70,12 @@ def data_figures(analysis, out_dir):
     out_dir = Path(out_dir)
     paths = []
     hist = analysis.get("length_hist")
-    if hist:                                     # words per sentence, same sentences in 3 languages
+    corpus = analysis.get("corpus", {})
+    langs = [l for l in ("english", "lugbara", "luganda") if l in corpus]
+    local = analysis.get("dataset") == "local"
+    if hist:                                     # words per sentence, the same sentences in each language
         fig, ax = plt.subplots(figsize=(8, 4))
-        for lang in ("english", "lugbara", "luganda"):
+        for lang in langs:
             h = hist[lang]
             xs = [int(k) for k in h]
             ys = [h[k] for k in h]
@@ -79,7 +84,9 @@ def data_figures(analysis, out_dir):
             ax.axvline(mean, color=LANG_COLOR[lang], linewidth=1, alpha=0.6)
             ax.annotate(f"mean {mean:.1f}", (mean, max(ys)), xytext=(3, 0), textcoords="offset points",
                         fontsize=8, color=INK2, rotation=90, va="top")
-        ax.set(title="Sentence length: the same 15,524 sentences in three languages",
+        n_sent = corpus["lugbara"]["sentences"]
+        n_lang = {2: "two", 3: "three"}.get(len(langs), str(len(langs)))
+        ax.set(title=f"Sentence length: the same {n_sent:,} sentences in {n_lang} languages",
                xlabel="Words per sentence", ylabel="Sentences")
         ax.legend(loc="upper right")
         paths.append(_save(fig, out_dir / "data_sentence_length.png"))
@@ -90,7 +97,7 @@ def data_figures(analysis, out_dir):
         words, counts = [w for w, _ in top][::-1], [c for _, c in top][::-1]
         bars = ax.barh(words, counts, color=SERIES[1], height=0.6, edgecolor=SURFACE, linewidth=2)
         _bar_labels(ax, bars, "{:,.0f}", horizontal=True)
-        ax.set(title="Most frequent Lugbara words", xlabel="Occurrences in the sample")
+        ax.set(title="Most frequent Lugbara words", xlabel="Occurrences in the " + ("corpus" if local else "sample"))
         ax.grid(axis="y", visible=False)
         paths.append(_save(fig, out_dir / "data_top_lugbara_words.png"))
 
@@ -110,7 +117,6 @@ def data_figures(analysis, out_dir):
     tok = analysis.get("tokenizers") or {}
     if tok:
         fig, ax = plt.subplots(figsize=(7, 4))
-        langs = ["english", "lugbara", "luganda"]
         names = list(tok)
         w = 0.36
         for i, name in enumerate(names):
@@ -123,8 +129,35 @@ def data_figures(analysis, out_dir):
         ax.set(title="How finely each thesis tokenizer cuts words", ylabel="Sub-word pieces per word")
         ax.legend(loc="upper left")
         ax.grid(axis="x", visible=False)
-        paths.append(_save(fig, out_dir / "data_tokenizer_pieces.png",
-                           note="Both tokenizers split the Lugbara apostrophe off as its own piece in every apostrophe word."))
+        shares = {("XLM-R" if k == "xlmr" else "mT5"): v["apostrophe_cut_off_share"] for k, v in tok.items()}
+        note = ("Both tokenizers split the Lugbara apostrophe off as its own piece in every apostrophe word."
+                if all(v >= 0.999 for v in shares.values()) else
+                "Apostrophe words whose apostrophe becomes its own piece: "
+                + ", ".join(f"{k} {100 * v:.0f}%" for k, v in shares.items()) + ".")
+        paths.append(_save(fig, out_dir / "data_tokenizer_pieces.png", note=note))
+
+    vs = analysis.get("vs_salt")
+    if vs:                                       # local corpus vs SALT sample: test words unseen in training
+        u = vs["unseen_test_words"]
+        fig, ax = plt.subplots(figsize=(7.5, 4))
+        w = 0.36
+        for i, tr in enumerate(("salt", "local")):
+            xs = [j + (i - 0.5) * w for j in range(2)]
+            bars = ax.bar(xs, [100 * u["lugbara"][f"{tr}>{te}"] for te in ("salt", "local")], width=w,
+                          color=DS_COLOR[tr], label=f"Training split of {DS_NAME[tr]}", edgecolor=SURFACE, linewidth=2)
+            _bar_labels(ax, bars, "{:.1f}%")
+        ax.set_xticks(range(2), ["SALT test split", "Local test split"])
+        top = max(100 * v for v in u["lugbara"].values())
+        ax.set_ylim(0, max(1, top) * 1.3)
+        ax.set(title="Lugbara test words never seen in training (lower is better)",
+               ylabel="% of Lugbara word tokens")
+        ax.legend(loc="upper left")
+        ax.grid(axis="x", visible=False)
+        eng = u["english"]
+        paths.append(_save(fig, out_dir / "data_unseen_words.png",
+                           note="A model cannot write a word it never saw. English, same order: "
+                                + ", ".join(f"{100 * eng[k]:.1f}%" for k in ("salt>salt", "local>salt", "salt>local", "local>local"))
+                                + "."))
     return paths
 
 
@@ -189,7 +222,7 @@ def training_figure(train_log, out_path, model_name):
 
 
 # ---------------------------------------------------------------- test scores
-def scores_figure(scores, out_path, model_name, thesis=None):
+def scores_figure(scores, out_path, model_name, thesis=None, note=None):
     """BLEU and chrF per direction (0-100, same axis), thesis BLEU as a reference tick; TER separately."""
     _style()
     dirs = list(scores)
@@ -229,8 +262,8 @@ def scores_figure(scores, out_path, model_name, thesis=None):
     ax2.set(title="TER (lower is better)", ylabel="Edits per 100 reference words")
     ax2.grid(axis="x", visible=False)
     n = sum(s["n"] for s in scores.values())
-    return _save(fig, out_path, note=f"{n:,} test sentence pairs from SALT. Thesis scores come from a different corpus "
-                                     "and are a reference point, not a like-for-like comparison.")
+    return _save(fig, out_path, note=f"{n:,} " + (note or "test sentence pairs from SALT. Thesis scores come from a "
+                                                   "different corpus and are a reference point, not a like-for-like comparison."))
 
 
 def length_figure(outputs_by_dir, out_path, model_name):
@@ -259,7 +292,7 @@ def length_figure(outputs_by_dir, out_path, model_name):
     return _save(fig, out_path, note="Length bins with fewer than 10 test sentences are left out.")
 
 
-def compare_figure(score_sets, out_path, metric="bleu", title=None):
+def compare_figure(score_sets, out_path, metric="bleu", title=None, note=None):
     """One metric per direction across models (≤ 3 models: the validated all-pairs slots)."""
     _style()
     names = list(score_sets)[:3]
@@ -279,7 +312,39 @@ def compare_figure(score_sets, out_path, metric="bleu", title=None):
     ax.set(title=title or f"Test {metric.upper()} by model and direction", ylabel=metric.upper())
     ax.legend(loc="upper right")
     ax.grid(axis="x", visible=False)
-    return _save(fig, out_path, note="Same SALT test split for every model.")
+    return _save(fig, out_path, note=note or "Same SALT test split for every model.")
+
+
+def dataset_figure(comparison, out_path, model_name):
+    """Cross-test (compare.json): bars = training corpus, groups = test split; BLEU and chrF per direction."""
+    _style()
+    table = comparison["table"]
+    dirs = list(table)
+    fig, axes = plt.subplots(len(dirs), 2, figsize=(10, 3.9 * len(dirs)), squeeze=False)
+    w = 0.36
+    for r, d in enumerate(dirs):
+        cells = table[d]
+        for c, (key, label) in enumerate((("bleu", "BLEU"), ("chrf", "chrF"))):
+            ax = axes[r][c]
+            for i, tr in enumerate(("salt", "local")):
+                xs, vs = [], []
+                for j, te in enumerate(("salt", "local")):
+                    if f"{tr}>{te}" in cells:
+                        xs.append(j + (i - 0.5) * w)
+                        vs.append(cells[f"{tr}>{te}"][key])
+                bars = ax.bar(xs, vs, width=w, color=DS_COLOR[tr], label=f"Trained on {DS_NAME[tr]}",
+                              edgecolor=SURFACE, linewidth=2)
+                _bar_labels(ax, bars)
+            ax.set_xticks(range(2), ["SALT test split", "Local test split"])
+            ax.set_ylim(0, max([v[key] for v in cells.values()] + [1]) * 1.35)
+            ax.set(title=f"{_pretty(d)}: {label}", ylabel=f"{label} (higher is better)")
+            ax.grid(axis="x", visible=False)
+            if r == 0 and c == 0:
+                ax.legend(loc="upper left")
+    fig.suptitle(f"{model_name}: trained on SALT vs trained on the local corpus", x=0.01, ha="left",
+                 fontsize=12, fontweight="bold", color=INK)
+    return _save(fig, out_path, note="Same model and settings, trained once on each corpus; each bar is one model "
+                                     "scored on one test split.")
 
 
 # ---------------------------------------------------------------- notebook helper
@@ -291,7 +356,7 @@ def show(paths):
             display(Image(filename=str(p)))
 
 
-def model_figures(model_dir_out, model_name, thesis=None):
+def model_figures(model_dir_out, model_name, thesis=None, test_note=None):
     """All per-model figures from a model's out/ folder (grid.json, train_log.json, scores.json, outputs)."""
     d = Path(model_dir_out)
     figs = d / "figures"
@@ -302,7 +367,7 @@ def model_figures(model_dir_out, model_name, thesis=None):
         paths.append(training_figure(json.loads((d / "train_log.json").read_text()), figs / "training.png", model_name))
     if (d / "scores.json").exists():
         paths.append(scores_figure(json.loads((d / "scores.json").read_text()), figs / "test_scores.png",
-                                   model_name, thesis))
+                                   model_name, thesis, note=test_note))
     outs = {p.name[len("test_outputs."):-len(".jsonl")]: [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()]
             for p in sorted(d.glob("test_outputs.*.jsonl"))}
     if outs:

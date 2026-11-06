@@ -4,6 +4,9 @@
 02  mT5     Lugbara / Luganda -> English          (thesis model)
 03  Fusion  XLM-R + mT5 ensemble, all 4 directions
 04  Report  plots comparing every published model (CPU only)
+05  mT5     Lugbara -> English on the local corpus, cross-tested against the SALT-trained mT5
+06  XLM-R   English -> Lugbara on the local corpus, cross-tested against the SALT-trained XLM-R (v1)
+07  Fusion  XLM-R + mT5, English <-> Lugbara on the local corpus, cross-tested against the SALT fusion
 """
 import json
 from pathlib import Path
@@ -113,6 +116,48 @@ def single_model(name, nb):
     return cells
 
 
+def local_model(name, nb):
+    """The same model and settings as its SALT run, trained on the local corpus, then the 2 x 2 cross-test."""
+    return [setup_md(nb["title"], nb["body"], nb["repo"], nb["hours"]), PIP, LOGIN,
+            code(f"""
+MODEL = "{nb["model"]}"
+REPO = "{nb["repo"]}"
+"""),
+            *writefiles("lugbara_mt.py", "lugbara_plots.py"), *STRICT,
+            md("## 1. Data: split the local corpus 70/15/15, prepare the SALT sample for the cross-tests, "
+               "and analyse the Lugbara (with a comparison against SALT)"),
+            code("""
+!python lugbara_mt.py prepare --dataset local
+!python lugbara_mt.py prepare
+!python lugbara_mt.py analyze --dataset local
+"""),
+            md("### Local corpus analysis and comparison with SALT: charts"), SHOW_DATA,
+            md("## 2. Fine-tune with the settings the SALT grid search chose (no new grid; early stopping on validation loss)"),
+            code("!python lugbara_mt.py train --model $MODEL --no-grid"),
+            md("## 3. Score on the local test split"),
+            code("""
+!python lugbara_mt.py evaluate --model $MODEL
+!cat out/$MODEL/scores.json
+"""),
+            md("## 4. Cross-tests: this model on the SALT test split, the SALT-trained twin on the local test split, "
+               "and the 2 × 2 table (trained on SALT / local × tested on SALT / local)"),
+            code("""
+!python lugbara_mt.py evaluate --model $MODEL --on salt --name on_salt
+!python lugbara_mt.py evaluate --model $MODEL --counterpart --on local --name salt_model_on_local
+!python lugbara_mt.py compare --model $MODEL
+"""),
+            md("## 5. Plots: training curves, test scores, quality by length, SALT vs local"),
+            code("""
+!python lugbara_mt.py plots --model $MODEL
+P.show(sorted(Path(f'out/{MODEL}/figures').glob('*.png')))
+"""),
+            md("## 6. Model card and upload"),
+            code("""
+!python lugbara_mt.py card --model $MODEL --repo $REPO
+!python lugbara_mt.py push --model $MODEL --repo $REPO
+""")]
+
+
 def fusion(name, nb):
     return [setup_md(nb["title"], nb["body"], nb["repo"], nb["hours"]), PIP, LOGIN,
             code(f'REPO = "{nb["repo"]}"'),
@@ -126,6 +171,45 @@ def fusion(name, nb):
             code("!python fusion_mt.py plots\nP.show(sorted(Path('out/fusion/figures').glob('*.png')))"),
             md("## 5. Model card and upload"),
             code("!python fusion_mt.py card --repo $REPO\n!python fusion_mt.py push --repo $REPO")]
+
+
+def fusion_local(name, nb):
+    """The fusion network on the local corpus (English <-> Lugbara), then the 2 x 2 cross-test."""
+    return [setup_md(nb["title"], nb["body"], nb["repo"], nb["hours"]), PIP, LOGIN,
+            code(f'REPO = "{nb["repo"]}"'),
+            *writefiles("lugbara_mt.py", "lugbara_plots.py", "fusion_mt.py"), *STRICT,
+            md("## 1. Data: split the local corpus 70/15/15, prepare the SALT sample for the cross-tests, "
+               "and analyse the Lugbara (with a comparison against SALT)"),
+            code("""
+!python lugbara_mt.py prepare --dataset local
+!python lugbara_mt.py prepare
+!python lugbara_mt.py analyze --dataset local
+"""),
+            md("### Local corpus analysis and comparison with SALT: charts"), SHOW_DATA,
+            md("## 2. Train the fusion model (English ↔ Lugbara, same settings as on SALT, early stopping on validation loss)"),
+            code("!python fusion_mt.py train --dataset local"),
+            md("## 3. Score on the local test split"),
+            code("""
+!python fusion_mt.py evaluate --dataset local
+!cat out/fusion_local/scores.json
+"""),
+            md("## 4. Cross-tests: this model on the SALT test split, the SALT-trained fusion model on the local "
+               "test split, and the 2 × 2 table"),
+            code("""
+!python fusion_mt.py evaluate --dataset local --on salt --name on_salt
+!python fusion_mt.py evaluate --dataset local --counterpart --on local --name salt_model_on_local
+!python fusion_mt.py compare --dataset local
+"""),
+            md("## 5. Plots: training, test scores, quality by length, fusion vs the local single models, SALT vs local"),
+            code("""
+!python fusion_mt.py plots --dataset local
+P.show(sorted(Path('out/fusion_local/figures').glob('*.png')))
+"""),
+            md("## 6. Model card and upload"),
+            code("""
+!python fusion_mt.py card --dataset local --repo $REPO
+!python fusion_mt.py push --dataset local --repo $REPO
+""")]
 
 
 def report(name, nb):
@@ -169,6 +253,34 @@ NOTEBOOKS = {
         "title": "Lugbara MT: results report and charts", "hours": "a few minutes",
         "body": "Downloads the published results of XLM-R, mT5 and the fusion model from Hugging Face and draws "
                 "the comparison charts. No GPU or token needed; models not yet published are skipped."}),
+    "05_mt5_local_corpus.ipynb": (local_model, {
+        "model": "mt5_local", "repo": "ckuma/lugbara-english-translator-local",
+        "title": "mT5 on the local corpus: Lugbara → English, compared with SALT", "hours": "about 2–3 hours",
+        "body": "The thesis's Lugbara→English model (mT5) trained on the local English–Lugbara corpus published "
+                "with the thesis ([Akuma1992/NLP-data-set](https://github.com/Akuma1992/NLP-data-set)), with the "
+                "settings its SALT run chose (learning rate 1e-3, batch 16; no new grid). It is then tested on both "
+                "test splits, and the SALT-trained mT5 ([ckuma/lugbara-english-translator]"
+                "(https://huggingface.co/ckuma/lugbara-english-translator)) is tested on the local split, so the "
+                "two corpora can be compared like for like."}),
+    "06_xlmr_local_corpus.ipynb": (local_model, {
+        "model": "xlmr_local", "repo": "ckuma/lugbara-multilingual-translator-local",
+        "title": "XLM-R on the local corpus: English → Lugbara, compared with SALT", "hours": "about 2–3 hours",
+        "body": "The thesis's English→Lugbara model (XLM-R encoder-decoder) trained on the local English–Lugbara "
+                "corpus published with the thesis ([Akuma1992/NLP-data-set](https://github.com/Akuma1992/NLP-data-set)), "
+                "with the settings of the first SALT-trained XLM-R (learning rate 3e-5, batch 16; no new grid). It is "
+                "then tested on both test splits, and that SALT-trained XLM-R (revision b2eec05b of "
+                "[ckuma/lugbara-multilingual-translator](https://huggingface.co/ckuma/lugbara-multilingual-translator)) "
+                "is tested on the local split."}),
+    "07_fusion_local_corpus.ipynb": (fusion_local, {
+        "repo": "ckuma/lugbara-ensemble-translator-local",
+        "title": "XLM-R + mT5 fusion on the local corpus: English ↔ Lugbara, compared with SALT",
+        "hours": "about 4–6 hours",
+        "body": "The fusion of the thesis's two models (XLM-R and mT5 both encode the source; mT5's decoder attends "
+                "over both) trained on the local English–Lugbara corpus published with the thesis "
+                "([Akuma1992/NLP-data-set](https://github.com/Akuma1992/NLP-data-set)) in both directions, with the "
+                "settings of the SALT-trained fusion model. It is then tested on both test splits, and the SALT-trained "
+                "fusion model ([ckuma/lugbara-ensemble-translator](https://huggingface.co/ckuma/lugbara-ensemble-translator)) "
+                "is tested on the local split."}),
 }
 
 for name, (fn, nb) in NOTEBOOKS.items():
